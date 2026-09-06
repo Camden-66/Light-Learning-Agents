@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
@@ -83,12 +84,24 @@ class LLMRoomAgent:
         }
 
     def _system_prompt(self) -> str:
+        """Build the condition prompt, varying only the disclosed likelihood.
+
+        Both conditions state the answer range. That range is a property of the
+        answer space rather than of the hidden relationship, so withholding it
+        would confound in-context model discovery with guessing outside the
+        support. Only the likelihood distinguishes the two conditions.
+        """
+
+        room = self.room_config
         common = (
             "You are an experimental agent outside a room with a light. "
-            "You may inspect one time slot at a time and receive only on or off. "
+            "You may inspect one time slot at a time, from 0 through "
+            f"{room.slot_count - 1}, and receive only on or off. "
             "You must use the full observation budget, then name the time slot "
-            "where the light is most likely to be on. The score is unavailable "
-            "until after your final answer. Return only the requested JSON object."
+            "where the light is most likely to be on. That slot is always an "
+            f"integer from {room.theta_min} through {room.theta_max}. "
+            "The score is unavailable until after your final answer. "
+            "Return only the requested JSON object."
         )
         if self.config.condition == "qualitative":
             return (
@@ -98,9 +111,10 @@ class LLMRoomAgent:
             )
         return (
             common
-            + " The hidden peak theta is one integer from 4 through 27. For a time "
-            "slot t from 0 through 31, P(on | t, theta) = 0.05 + 0.90 * "
-            "exp(-(t - theta)^2 / 18). Theta itself remains hidden."
+            + " Writing theta for that hidden slot and t for a time slot, "
+            f"P(on | t, theta) = {room.background_probability:g} + "
+            f"{room.peak_amplitude:g} * exp(-(t - theta)^2 / "
+            f"{room.exponent_denominator:g}). Theta itself remains hidden."
         )
 
     @staticmethod
@@ -248,6 +262,7 @@ class LLMRoomAgent:
                 backend_metadata = dict(self.client.model_metadata(self.config.model))
             except Exception as error:
                 backend_metadata = {"model_metadata_error": f"{type(error).__name__}: {error}"}
+            prompt = self._system_prompt()
             self._metadata_cache = {
                 "agent": self.agent_id,
                 "model": self.config.model,
@@ -255,6 +270,12 @@ class LLMRoomAgent:
                 "generation": dict(self._options),
                 "thinking_enabled": self.config.thinking_enabled,
                 "schema_retries": self.config.schema_retries,
+                # Pin the exact prompt: it is the experiment's main variable, so
+                # a manifest must show which wording produced a run.
+                "system_prompt": prompt,
+                "system_prompt_sha256": hashlib.sha256(
+                    prompt.encode("utf-8")
+                ).hexdigest(),
                 "backend": backend_metadata,
             }
         return self._metadata_cache
