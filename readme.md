@@ -130,13 +130,11 @@ Without `uv`: `python -m pip install -e ".[dev]"` then `light-learning web`.
 
 Open **http://127.0.0.1:8768/**. If the port is taken: `lsof -i :8768`.
 
-Play the 32 windows yourself (first `B` clicks look; the next click is your
-guess). After you commit:
-
-- **Compare oracle MLE** — green guess; it uses the true formula.
-- **Train REINFORCE demo** then **Compare REINFORCE demo** — blue guess; policy only.
-- **Compare emergent model** — violet guess and dashed inferred `P(on|t)`.
-- **Pool lamp shape** — optional; learns `(σ, a, b)` from other rooms first.
+Play the 32 windows (first `B` looks; next click commits). Then compare
+oracle MLE, the frozen RL policy, and the emergent model on **this**
+episode. RL is trained once per budget on other rooms in the background —
+you do not retrain for every New episode. Retrain only if you want a new
+seed (seed 0 always reproduces the same demo curve).
 
 Orange = true θ. White dashed = you. Green = MLE. Blue = REINFORCE. Violet =
 emergent.

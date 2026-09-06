@@ -58,7 +58,7 @@
       <button type="button" id="run-mle" disabled>Compare oracle MLE</button>
       <button type="button" id="run-rl" disabled>Compare REINFORCE demo</button>
       <button type="button" id="run-emergent" disabled>Compare emergent model</button>
-      <p class="status" id="status">Click New episode, then click windows to look. After the budget, click once to commit.</p>
+      <p class="status" id="status">A new episode is ready. Look, commit, then compare MLE / RL / emergent on this same hidden peak.</p>
     </div>
 
     <div class="meters">
@@ -88,15 +88,16 @@
   </section>
 
   <section class="ppo">
-    <h2>RL training (REINFORCE on GymRoomEnv)</h2>
+    <h2>RL policy (REINFORCE, reused across episodes)</h2>
     <p class="caption">
-      Same public observation and terminal reward as PPO: look steps give 0, commit gives −|θ − θ̂| / 31.
-      This demo trains a linear softmax policy for a few hundred episodes so you can watch MAE fall.
-      Stable-Baselines3 PPO lives in <code>light_learning.ppo</code> for longer runs.
+      Training does <em>not</em> use the episode you are playing. A linear softmax policy is trained
+      once per budget on <em>other</em> random rooms, then frozen. New episode only changes the hidden
+      peak; Compare RL applies that same frozen policy here. Clicking Train with seed 0 always
+      reproduces the same curve — use Retrain for a new seed. Official PPO is <code>light_learning.ppo</code>.
     </p>
     <div class="stage-bar">
-      <button type="button" id="train-rl">Train REINFORCE demo (250 episodes)</button>
-      <p class="status" id="rl-status">Not trained yet. Training uses random peaks, not the episode you are playing.</p>
+      <button type="button" id="train-rl">Retrain REINFORCE (new seed)</button>
+      <p class="status" id="rl-status">A policy for this budget is prepared in the background. You do not train again for each episode.</p>
     </div>
     <div class="meters" id="rl-meters">
       <div><span>Train episodes</span><strong id="rl-n">—</strong></div>

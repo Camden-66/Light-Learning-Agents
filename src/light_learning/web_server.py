@@ -8,7 +8,7 @@ import threading
 import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .config import BUDGETS, RoomConfig
 from .mle import PassiveUniformOracleMLE, likelihood_profile, run_mle_episode
@@ -18,7 +18,7 @@ from .types import TerminalOutcome
 WEB_ROOT = Path(__file__).resolve().parent / "web"
 _LOCK = threading.Lock()
 _SESSIONS: dict[str, dict] = {}
-_RL: dict | None = None
+_RL_BY_BUDGET: dict[int, dict] = {}
 _EMERGENT: dict | None = None
 _METRICS_CACHE: dict | None = None
 
@@ -110,8 +110,11 @@ class Handler(SimpleHTTPRequestHandler):
             self._json(200, metrics)
             return
         if path == "/api/rl":
+            query = parse_qs(urlparse(self.path).query)
+            raw_budget = query.get("budget", [None])[0]
+            budget = int(raw_budget) if raw_budget is not None else None
             with _LOCK:
-                payload = _rl_public()
+                payload = _rl_public(budget)
             self._json(200, payload)
             return
         if path == "/api/emergent":
@@ -296,22 +299,19 @@ class Handler(SimpleHTTPRequestHandler):
         }
 
     def _rl_play(self, body: dict) -> dict:
-        global _RL
         session = self._session(body)
         env: RoomEnv = session["env"]
         terminal = _require_terminal(env)
-        if _RL is None:
-            raise ApiError(409, "train the REINFORCE demo first")
-        if int(_RL["budget"]) != env.budget:
+        policy = _RL_BY_BUDGET.get(env.budget)
+        if policy is None:
             raise ApiError(
                 409,
-                f"trained REINFORCE budget is {_RL['budget']}; "
-                f"this episode uses budget {env.budget}",
+                f"no REINFORCE policy for budget {env.budget}",
             )
         from .rl_train import play_policy
 
         result = play_policy(
-            _RL["W"],
+            policy["W"],
             budget=env.budget,
             seed=session["seed"],
             theta=terminal.theta,
@@ -441,41 +441,44 @@ def _pool_emergent(body: dict) -> dict:
     return _emergent_public()
 
 
-def _rl_public() -> dict:
-    if _RL is None:
+def _rl_public(budget: int | None = None) -> dict:
+    entry = _RL_BY_BUDGET.get(int(budget)) if budget is not None else None
+    if entry is None:
         return {
             "trained": False,
             "reportable": False,
             "evaluation_label": "non_reportable_demo_smoke",
+            "budget": budget,
         }
     return {
         "trained": True,
         "reportable": False,
         "evaluation_label": "non_reportable_demo_smoke",
-        "budget": _RL["budget"],
-        "n_episodes": _RL["n_episodes"],
-        "history": _RL["history"],
-        "demo_mae": _RL["eval_mae"],
-        "demo_hit_within_one": _RL["eval_hit_within_one"],
-        "algo": _RL["algo"],
+        "budget": entry["budget"],
+        "train_seed": entry.get("train_seed"),
+        "n_episodes": entry["n_episodes"],
+        "history": entry["history"],
+        "demo_mae": entry["eval_mae"],
+        "demo_hit_within_one": entry["eval_hit_within_one"],
+        "algo": entry["algo"],
         "note": (
-            f"{_RL['note']} Illustrative smoke result only; do not use in "
-            "benchmark tables."
+            f"{entry['note']} Trained on other rooms, then frozen and applied "
+            "to this episode. Illustrative smoke result only."
         ),
     }
 
 
 def _train_rl(body: dict) -> dict:
-    global _RL
     from .rl_train import train_reinforce
 
     budget = int(body.get("budget", 8))
     n_episodes = int(body.get("episodes", 250))
     seed = int(body.get("seed", 0))
     result = train_reinforce(budget=budget, n_episodes=n_episodes, seed=seed)
+    result["train_seed"] = seed
     with _LOCK:
-        _RL = result
-    return _rl_public()
+        _RL_BY_BUDGET[budget] = result
+    return _rl_public(budget)
 
 
 def _require_terminal(env: RoomEnv) -> TerminalOutcome:

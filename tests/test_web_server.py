@@ -11,12 +11,12 @@ from light_learning import web_server
 @pytest.fixture(autouse=True)
 def reset_web_state():
     web_server._SESSIONS.clear()
-    web_server._RL = None
+    web_server._RL_BY_BUDGET.clear()
     web_server._EMERGENT = None
     web_server._METRICS_CACHE = None
     yield
     web_server._SESSIONS.clear()
-    web_server._RL = None
+    web_server._RL_BY_BUDGET.clear()
     web_server._EMERGENT = None
     web_server._METRICS_CACHE = None
 
@@ -91,7 +91,7 @@ def test_comparisons_are_rejected_before_original_episode_terminates(
 ) -> None:
     payload = _new_deterministic_session(handler, monkeypatch)
     if operation == "rl":
-        web_server._RL = {"budget": 4}
+        web_server._RL_BY_BUDGET[4] = {"budget": 4}
 
     call = {
         "mle": handler._mle,
@@ -179,9 +179,9 @@ def test_reinforce_policy_must_match_episode_budget(
 ) -> None:
     payload = _new_deterministic_session(handler, monkeypatch, budget=4)
     _finish_episode(handler, payload["session"], budget=4)
-    web_server._RL = {"budget": 8}
+    web_server._RL_BY_BUDGET[8] = {"budget": 8, "W": [[0.0]]}
 
-    with pytest.raises(web_server.ApiError, match="budget is 8") as caught:
+    with pytest.raises(web_server.ApiError, match="no REINFORCE policy for budget 4") as caught:
         handler._rl_play({"session": payload["session"]})
     assert caught.value.status == 409
 
@@ -195,7 +195,7 @@ def test_demo_metrics_are_explicitly_non_reportable() -> None:
     assert all(row["reportable"] is False for row in metrics["budgets"].values())
     assert "official benchmark results" in metrics["warning"]
 
-    web_server._RL = {
+    web_server._RL_BY_BUDGET[8] = {
         "budget": 8,
         "n_episodes": 2,
         "history": [],
@@ -203,8 +203,9 @@ def test_demo_metrics_are_explicitly_non_reportable() -> None:
         "eval_hit_within_one": 0.25,
         "algo": "reinforce",
         "note": "Small demo.",
+        "train_seed": 0,
     }
-    public = web_server._rl_public()
+    public = web_server._rl_public(8)
     assert public["reportable"] is False
     assert public["evaluation_label"] == "non_reportable_demo_smoke"
     assert "demo_mae" in public
