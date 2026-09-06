@@ -8,11 +8,23 @@ then estimate the hidden time slot where it is most likely to be on.
 
 - a deterministic canonical room environment and Gymnasium adapter;
 - shared state and episode-record contracts for the evaluator owner;
-- a local Ollama-backed LLM room agent using structured JSON actions; and
-- the teammate handoff for RL and MLE baseline implementations in
-  [`docs/baseline-build-spec.md`](docs/baseline-build-spec.md).
+- a local Ollama-backed LLM room agent using structured JSON actions;
+- the passive uniform-query oracle-likelihood MLE baseline; and
+- a PPO helper on `GymRoomEnv`.
 
-RL, oracle-MLE, and evaluator implementations are intentionally not included.
+The evaluator (held-out banks, JSONL artifacts) is still a separate teammate
+deliverable: [`docs/evaluator-build-spec.md`](docs/evaluator-build-spec.md).
+
+## Interactive explainer
+
+```bash
+uv sync --extra dev
+uv run light-learning web --port 8767
+```
+
+Open http://127.0.0.1:8767/ — it drives the same `RoomEnv` as the rest of the
+package. **Train RL** runs on-policy REINFORCE on `GymRoomEnv` and plots rolling
+MAE; **Run trained RL on this episode** compares that policy to oracle MLE.
 
 ## Setup
 
