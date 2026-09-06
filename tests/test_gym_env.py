@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 gymnasium = pytest.importorskip("gymnasium")
+from gymnasium.utils.env_checker import check_env
 
+from light_learning.config import BUDGETS
 from light_learning.gym_env import GymRoomEnv
 
 
@@ -33,3 +35,22 @@ def test_gym_adapter_rejects_invalid_action() -> None:
     env.reset(seed=123)
     with pytest.raises(ValueError):
         env.step(32)
+
+
+@pytest.mark.parametrize("budget", BUDGETS)
+def test_gym_checker_and_complete_rollout_at_every_budget(budget: int) -> None:
+    env = GymRoomEnv(budget=budget)
+    check_env(env, skip_render_check=True)
+    observation, _ = env.reset(seed=10_000 + budget)
+    assert env.observation_space.contains(observation)
+
+    terminated = False
+    actions = 0
+    while not terminated:
+        observation, _, terminated, truncated, _ = env.step(actions % 32)
+        assert env.observation_space.contains(observation)
+        assert truncated is False
+        actions += 1
+
+    assert actions == budget + 1
+    env.close()

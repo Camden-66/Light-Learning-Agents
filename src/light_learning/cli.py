@@ -53,6 +53,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     preflight_parser.add_argument("--base-url", default="http://127.0.0.1:11434")
     preflight_parser.add_argument("--model", dest="models", action="append")
+    web_parser = subparsers.add_parser("web", help="interactive RoomEnv explainer")
+    web_parser.add_argument("--host", default="127.0.0.1")
+    web_parser.add_argument("--port", type=int, default=8767)
     args = parser.parse_args(argv)
 
     if args.command == "preflight":
@@ -62,6 +65,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0 if ready else 2
+    if args.command == "web":
+        from .web_server import serve
+
+        serve(host=args.host, port=args.port)
+        return 0
     raise AssertionError("unreachable")
 
 

@@ -18,6 +18,9 @@ dependencies = [
 dev = [
   "pytest>=8.0,<10.0",
 ]
+rl = [
+  "stable-baselines3>=2.7,<3.0",
+]
 
 [project.scripts]
 light-learning = "light_learning.cli:main"

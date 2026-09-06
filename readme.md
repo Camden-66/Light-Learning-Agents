@@ -8,20 +8,46 @@ then estimate the hidden time slot where it is most likely to be on.
 
 - a deterministic canonical room environment and Gymnasium adapter;
 - shared state and episode-record contracts for the evaluator owner;
-- a local Ollama-backed LLM room agent using structured JSON actions; and
-- the teammate handoff for RL and MLE baseline implementations in
-  [`docs/baseline-build-spec.md`](docs/baseline-build-spec.md).
+- a local Ollama-backed LLM room agent using structured JSON actions;
+- the passive uniform-query oracle-likelihood MLE baseline; and
+- a Stable-Baselines3 PPO training matrix and evaluator-facing agent adapter.
 
-RL, oracle-MLE, and evaluator implementations are intentionally not included.
+The evaluator (held-out banks, JSONL artifacts) is still a separate teammate
+deliverable: [`docs/evaluator-build-spec.md`](docs/evaluator-build-spec.md).
+
+## Interactive explainer
+
+```bash
+uv sync --extra dev
+uv run light-learning web --port 8767
+```
+
+Open http://127.0.0.1:8767/ — it drives the same `RoomEnv` as the rest of the
+package. **Train RL** runs on-policy REINFORCE on `GymRoomEnv` and plots rolling
+MAE; **Run trained RL on this episode** compares that policy to oracle MLE only
+after you commit. This small REINFORCE trainer and its smoke-sample metrics are
+an explainer, not the reportable PPO benchmark.
 
 ## Setup
 
 This project targets Python 3.12 and `uv`:
 
 ```bash
-uv sync --extra dev
+uv sync --extra dev --extra rl
 uv run pytest
 ```
+
+The `rl` extra is separately declared so non-RL users can omit it; include it
+whenever you train PPO or run the complete test suite.
+
+`light_learning.ppo.train_ppo_suite(...)` defaults to the required four budgets
+and five independent training seeds, saves one checkpoint per run, and writes a
+manifest. The evaluator loads each checkpoint through `PPORoomAgent` and owns
+held-out episodes, `EpisodeRecord` construction, and all reported metrics.
+
+The MLE agent requires an explicit evaluator-owned `query_seed` for each
+episode. It must be independent of the hidden room seed; this makes its uniform
+query schedule reproducible across retries and resumed runs.
 
 The local LLM experiment needs a running Ollama server and both requested
 models installed. The CLI never pulls models automatically. Check readiness

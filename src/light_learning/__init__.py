@@ -4,6 +4,8 @@ from .config import BUDGETS, SLOT_COUNT, RoomConfig
 from .gym_env import GymRoomEnv
 from .llm_agent import LLMRoomAgent, LLMRoomAgentConfig
 from .ollama import ChatResponse, OllamaChatClient, OllamaError
+from .mle import PassiveUniformOracleMLE
+from .ppo import PPORoomAgent, train_ppo, train_ppo_suite
 from .room import RoomEnv
 from .types import EpisodeDefinition, EpisodeRecord, Observation, RoomState
 
@@ -15,6 +17,8 @@ __all__ = [
     "GymRoomEnv",
     "LLMRoomAgent",
     "LLMRoomAgentConfig",
+    "PassiveUniformOracleMLE",
+    "PPORoomAgent",
     "Observation",
     "OllamaChatClient",
     "OllamaError",
@@ -22,4 +26,6 @@ __all__ = [
     "RoomConfig",
     "RoomEnv",
     "RoomState",
+    "train_ppo",
+    "train_ppo_suite",
 ]
