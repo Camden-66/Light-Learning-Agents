@@ -1,0 +1,69 @@
+"""Operational checks for local LLM setup; evaluation execution is teammate-owned."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+from pathlib import Path
+from typing import Sequence
+
+from .ollama import OllamaChatClient, OllamaError
+
+REQUIRED_FREE_BYTES = 10 * 1024**3
+DEFAULT_MODELS = ("qwen3:1.7b", "qwen3:4b")
+
+
+def preflight(*, base_url: str, models: Sequence[str]) -> tuple[dict[str, object], bool]:
+    """Check disk/server/model readiness without pulling or altering anything."""
+
+    free_bytes = shutil.disk_usage(Path.cwd()).free
+    report: dict[str, object] = {
+        "required_free_bytes": REQUIRED_FREE_BYTES,
+        "free_bytes": free_bytes,
+        "disk_ready": free_bytes >= REQUIRED_FREE_BYTES,
+        "base_url": base_url,
+        "required_models": list(models),
+    }
+    try:
+        with OllamaChatClient(base_url) as client:
+            installed = client.list_models()
+        installed_names = {
+            str(item.get("name") or item.get("model")) for item in installed
+        }
+        missing = [model for model in models if model not in installed_names]
+        report["ollama_ready"] = True
+        report["installed_models"] = sorted(installed_names)
+        report["missing_models"] = missing
+    except OllamaError as error:
+        report["ollama_ready"] = False
+        report["ollama_error"] = str(error)
+        report["missing_models"] = list(models)
+    ready = bool(
+        report["disk_ready"] and report["ollama_ready"] and not report["missing_models"]
+    )
+    return report, ready
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="light-learning")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    preflight_parser = subparsers.add_parser(
+        "preflight", help="check local disk, Ollama server, and model availability"
+    )
+    preflight_parser.add_argument("--base-url", default="http://127.0.0.1:11434")
+    preflight_parser.add_argument("--model", dest="models", action="append")
+    args = parser.parse_args(argv)
+
+    if args.command == "preflight":
+        report, ready = preflight(
+            base_url=args.base_url,
+            models=tuple(args.models or DEFAULT_MODELS),
+        )
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if ready else 2
+    raise AssertionError("unreachable")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
