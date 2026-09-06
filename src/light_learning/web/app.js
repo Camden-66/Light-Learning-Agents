@@ -416,18 +416,31 @@ async function runRl() {
   refreshCharts();
 }
 
+function pct(x) {
+  return `${(Number(x) * 100).toFixed(0)}%`;
+}
+
+// One source per meter. Showing the pooled prior and the in-episode posterior
+// under the same label at the same time made two different numbers look like a
+// contradiction.
 function renderEmergentMeters() {
   const e = state.emergent;
   const pool = state.emergentPool;
+  const src = e || (pool && pool.pooled ? pool : null);
+  const scope = e ? "this episode" : pool && pool.pooled ? "pooled prior" : "—";
   document.getElementById("em-n").textContent = pool && pool.pooled ? String(pool.n_episodes) : "—";
-  if (e) {
-    document.getElementById("em-sigma").textContent = Number(e.sigma).toFixed(1);
-    document.getElementById("em-mass").textContent = `${(Number(e.sigma_mass_at_3) * 100).toFixed(0)}%`;
-    document.getElementById("em-ab").textContent = `${Number(e.background).toFixed(2)}, ${Number(e.amplitude).toFixed(2)}`;
+  document.getElementById("em-scope").textContent = scope;
+  if (src) {
+    const sigma = e ? Number(e.sigma) : Number(src.mean_sigma);
+    document.getElementById("em-sigma").textContent = Number.isFinite(sigma) ? sigma.toFixed(1) : "—";
+    document.getElementById("em-mass").textContent =
+      `${pct(src.sigma_mass_near_3)} vs ${pct(src.sigma_mass_chance)} chance`;
+    document.getElementById("em-ab").textContent = e
+      ? `${Number(e.background).toFixed(2)}, ${Number(e.amplitude).toFixed(2)}`
+      : "—";
   } else {
     document.getElementById("em-sigma").textContent = "—";
-    document.getElementById("em-mass").textContent =
-      pool && pool.pooled ? `${(Number(pool.sigma_mass_at_3) * 100).toFixed(0)}%` : "—";
+    document.getElementById("em-mass").textContent = "—";
     document.getElementById("em-ab").textContent = "—";
   }
 }
@@ -440,7 +453,11 @@ function renderEmergentPool(data) {
     renderEmergentMeters();
     return;
   }
-  status.textContent = `Pooled ${data.n_episodes} rooms at budget ${data.budget}. Mass on σ=3 is ${(data.sigma_mass_at_3 * 100).toFixed(0)}%. ${data.note}`;
+  status.textContent =
+    `Pooled ${data.n_episodes} rooms at budget ${data.budget}. ` +
+    `Mass within one grid step of σ=3 is ${pct(data.sigma_mass_near_3)} against ` +
+    `${pct(data.sigma_mass_chance)} for a posterior that learned nothing ` +
+    `(posterior mean σ ${Number(data.mean_sigma).toFixed(2)}, true 3). ${data.note}`;
   renderEmergentMeters();
 }
 
@@ -448,15 +465,20 @@ async function poolEmergent() {
   const btn = document.getElementById("pool-emergent");
   const budget = Number(document.getElementById("budget").value);
   btn.disabled = true;
-  document.getElementById("emergent-status").textContent = "Pooling lamp shape from training rooms… a few seconds.";
+  const POOL_ROOMS = 32;
+  document.getElementById("emergent-status").textContent =
+    `Pooling lamp shape from ${POOL_ROOMS} training rooms… this runs ${POOL_ROOMS} full episodes, around 15 seconds.`;
   try {
-    const data = await api("/api/emergent/pool", { budget, episodes: 8, seed: 0 });
+    const data = await api("/api/emergent/pool", { budget, episodes: POOL_ROOMS, seed: 0 });
     if (data.error) {
       document.getElementById("emergent-status").textContent = data.error;
       return;
     }
     renderEmergentPool(data);
-    addLog(`Pooled emergent shape on ${data.n_episodes} rooms. Mass on σ=3: ${(data.sigma_mass_at_3 * 100).toFixed(0)}%.`);
+    addLog(
+      `Pooled emergent shape on ${data.n_episodes} rooms. Mass near σ=3: ` +
+      `${pct(data.sigma_mass_near_3)} (chance ${pct(data.sigma_mass_chance)}).`
+    );
   } finally {
     btn.disabled = false;
   }
@@ -478,7 +500,9 @@ async function runEmergent() {
   }
   state.emergent = res;
   addLog(
-    `Emergent (${res.condition}) guessed ${res.theta_hat}, error ${res.absolute_error}, σ=${Number(res.sigma).toFixed(1)}, mass@3=${(Number(res.sigma_mass_at_3) * 100).toFixed(0)}%.`
+    `Emergent (${res.condition}) guessed ${res.theta_hat}, error ${res.absolute_error}, ` +
+    `σ=${Number(res.sigma).toFixed(1)}, mass near σ=3 ${pct(res.sigma_mass_near_3)} ` +
+    `(chance ${pct(res.sigma_mass_chance)}).`
   );
   setStatus("Violet = emergent peak and dashed inferred P(on|t). It did not receive the canonical formula.");
   paintWindows();

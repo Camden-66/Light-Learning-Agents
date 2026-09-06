@@ -64,7 +64,7 @@ button:hover { border-color: var(--gold); color: var(--gold); }
 .window.rl { outline: 2px solid #6ea8d4; outline-offset: 3px; }
 .window.emergent { outline: 2px solid #c084fc; outline-offset: -8px; }
 #rl-meters { grid-template-columns: repeat(3, 1fr); }
-#emergent-meters { grid-template-columns: repeat(4, 1fr); }
+#emergent-meters { grid-template-columns: repeat(5, 1fr); }
 .meters div { border: 1px solid var(--line); padding: 0.6rem 0.75rem; }
 .meters span { display: block; color: var(--muted); font-size: 0.72rem; letter-spacing: 0.04em; }
 .meters strong { font-size: 1.15rem; font-weight: 500; }

@@ -125,16 +125,17 @@
       Four steps: (1) assume only “the light has some bump in time”; (2) pick the next look that most
       shrinks uncertainty over (μ, σ, a, b); (3) after you commit, optionally pool revealed peaks from
       other rooms to learn the lamp’s width and height; (4) on this room, output a peak and an implied
-      P(on|t). The model never receives 0.05, 0.90, or 18. True σ is 3.
+      P(on|t). The model never receives 0.05, 0.90, or 18. True σ is 3, so the width check reports posterior mass within one grid step of 3 next to the mass an unlearned posterior already puts there.
     </p>
     <div class="stage-bar">
-      <button type="button" id="pool-emergent">Pool lamp shape (8 training rooms)</button>
+      <button type="button" id="pool-emergent">Pool lamp shape (32 training rooms)</button>
       <p class="status" id="emergent-status">No pooled shape yet. Compare still works in-episode only.</p>
     </div>
     <div class="meters" id="emergent-meters">
       <div><span>Pooled rooms</span><strong id="em-n">—</strong></div>
       <div><span>MAP σ</span><strong id="em-sigma">—</strong></div>
-      <div><span>Mass on σ=3</span><strong id="em-mass">—</strong></div>
+      <div><span>Mass near σ=3 vs chance</span><strong id="em-mass">—</strong></div>
+      <div><span>Reading</span><strong id="em-scope">—</strong></div>
       <div><span>Inferred a, b</span><strong id="em-ab">—</strong></div>
     </div>
   </section>

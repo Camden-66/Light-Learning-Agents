@@ -14,6 +14,7 @@ pattern rather than a reward-trained look/guess policy.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from math import exp, log
 from typing import Any, Iterable, Sequence
@@ -26,6 +27,10 @@ SIGMAS = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 6.0, 8.0)
 BACKGROUNDS = (0.02, 0.05, 0.10, 0.20)
 AMPLITUDES = (0.50, 0.70, 0.85, 0.90)
 TRUE_SIGMA = 3.0  # diagnostics only; never used as an agent prior spike
+# One grid step either side of TRUE_SIGMA. Exact-match mass on a coarse grid is
+# a brittle read: with finite data the posterior legitimately splits between the
+# 3.0 and 3.5 columns, so exact mass can fall while the fit is improving.
+SIGMA_TOLERANCE = 0.5
 
 
 History = Sequence[tuple[int, int]]
@@ -68,9 +73,20 @@ class Hypothesis:
     amplitude: float
 
 
-def hypothesis_grid(slot_count: int = SLOT_COUNT) -> tuple[Hypothesis, ...]:
+def hypothesis_grid(config: RoomConfig | None = None) -> tuple[Hypothesis, ...]:
+    """Enumerate bump hypotheses over the *answerable* peak locations.
+
+    ``mu`` ranges over ``config.theta_candidates`` rather than every slot. The
+    theta support is task framing that the room states up front, not part of
+    the hidden generator, so withholding it would only add an answer-space
+    handicap on top of the model-discovery problem this agent is meant to
+    measure. Looks still range over all ``slot_count`` slots; only the terminal
+    estimate is constrained. Same reasoning as the LLM prompt conditions.
+    """
+
+    room = config or RoomConfig()
     rows: list[Hypothesis] = []
-    for mu in range(slot_count):
+    for mu in room.theta_candidates:
         for sigma in SIGMAS:
             for background in BACKGROUNDS:
                 for amplitude in AMPLITUDES:
@@ -92,17 +108,22 @@ def probability_table(
     )
 
 
-_GRID_CACHE: dict[int, tuple[tuple[Hypothesis, ...], tuple[tuple[float, ...], ...]]] = {}
+_GridKey = tuple[int, tuple[int, ...]]
+_GRID_CACHE: dict[
+    _GridKey, tuple[tuple[Hypothesis, ...], tuple[tuple[float, ...], ...]]
+] = {}
 
 
 def cached_grid(
-    slot_count: int = SLOT_COUNT,
+    config: RoomConfig | None = None,
 ) -> tuple[tuple[Hypothesis, ...], tuple[tuple[float, ...], ...]]:
-    packed = _GRID_CACHE.get(slot_count)
+    room = config or RoomConfig()
+    key: _GridKey = (room.slot_count, room.theta_candidates)
+    packed = _GRID_CACHE.get(key)
     if packed is None:
-        hyps = hypothesis_grid(slot_count)
-        packed = (hyps, probability_table(hyps, slot_count))
-        _GRID_CACHE[slot_count] = packed
+        hyps = hypothesis_grid(room)
+        packed = (hyps, probability_table(hyps, room.slot_count))
+        _GRID_CACHE[key] = packed
     return packed
 
 
@@ -208,6 +229,49 @@ def shape_posterior_mass(
     )
 
 
+def sigma_marginal(
+    history: History,
+    hypotheses: Sequence[Hypothesis],
+    shape_log_prior: Sequence[float] | None = None,
+    table: Sequence[Sequence[float]] | None = None,
+) -> dict[float, float]:
+    """Posterior marginal over bump width, summed across mu, a and b."""
+
+    probs = _softmax(log_posterior(history, hypotheses, shape_log_prior, table))
+    marginal: dict[float, float] = {}
+    for weight, hyp in zip(probs, hypotheses):
+        marginal[hyp.sigma] = marginal.get(hyp.sigma, 0.0) + weight
+    return marginal
+
+
+def posterior_mean_sigma(
+    history: History,
+    hypotheses: Sequence[Hypothesis],
+    shape_log_prior: Sequence[float] | None = None,
+    table: Sequence[Sequence[float]] | None = None,
+) -> float:
+    marginal = sigma_marginal(history, hypotheses, shape_log_prior, table)
+    return float(sum(sigma * mass for sigma, mass in marginal.items()))
+
+
+def sigma_mass_chance_level(
+    hypotheses: Sequence[Hypothesis],
+    *,
+    sigma: float = TRUE_SIGMA,
+    atol: float = SIGMA_TOLERANCE,
+) -> float:
+    """Mass a *non-learning* uniform posterior already puts in the same band.
+
+    Reporting a width-recovery number without this is meaningless: the reader
+    cannot tell 10% concentrated from 10% chance.
+    """
+
+    if not hypotheses:
+        return 0.0
+    hits = sum(1 for hyp in hypotheses if abs(hyp.sigma - sigma) <= atol)
+    return hits / len(hypotheses)
+
+
 def best_look_slot(
     history: History,
     hypotheses: Sequence[Hypothesis],
@@ -309,11 +373,19 @@ class EmergentBumpAgent:
             raise TypeError("policy_seed must be an integer")
         self.config = config or RoomConfig()
         self.policy_seed = policy_seed
-        self.hypotheses, self.table = cached_grid(self.config.slot_count)
+        self.hypotheses, self.table = cached_grid(self.config)
         if shape_log_prior is not None and len(shape_log_prior) != len(self.hypotheses):
             raise ValueError("shape_log_prior must match the hypothesis grid")
         self.shape_log_prior = (
             None if shape_log_prior is None else tuple(float(x) for x in shape_log_prior)
+        )
+        self.shape_prior_digest = (
+            None
+            if self.shape_log_prior is None
+            else "sha256:"
+            + hashlib.sha256(
+                json.dumps([round(x, 9) for x in self.shape_log_prior]).encode("utf-8")
+            ).hexdigest()
         )
         self.condition = condition
 
@@ -356,6 +428,18 @@ class EmergentBumpAgent:
                 shape_log_prior=self.shape_log_prior,
                 table=self.table,
             ),
+            "sigma_mass_near_3": shape_posterior_mass(
+                history,
+                self.hypotheses,
+                sigma=TRUE_SIGMA,
+                atol=SIGMA_TOLERANCE,
+                shape_log_prior=self.shape_log_prior,
+                table=self.table,
+            ),
+            "sigma_mass_chance": sigma_mass_chance_level(self.hypotheses),
+            "mean_sigma": posterior_mean_sigma(
+                history, self.hypotheses, self.shape_log_prior, self.table
+            ),
             "curve": curve,
         }
 
@@ -375,15 +459,26 @@ class EmergentBumpAgent:
         )
 
     def run_metadata(self) -> dict[str, Any]:
-        return {
+        metadata: dict[str, Any] = {
             "hypothesis_family": "unimodal_gaussian_bump",
             "sigmas": list(SIGMAS),
             "backgrounds": list(BACKGROUNDS),
             "amplitudes": list(AMPLITUDES),
+            "theta_candidates": list(self.config.theta_candidates),
             "canonical_formula_disclosed": False,
+            "condition": self.condition,
             "pooled_shape_prior": self.shape_log_prior is not None,
+            "shape_prior_digest": self.shape_prior_digest,
             "policy_seed": self.policy_seed,
         }
+        # The pooled prior is this agent's main variable. Without pinning it,
+        # two runs over different training pools are indistinguishable in the
+        # manifest -- same failure the LLM prompt digest exists to prevent.
+        canonical = json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+        metadata["configuration_digest"] = (
+            "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        )
+        return metadata
 
 
 def collect_labeled_episode(

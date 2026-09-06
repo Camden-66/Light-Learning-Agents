@@ -89,11 +89,32 @@ The true room bump is a Gaussian with `σ = 3` (because `exp(-d²/18)` equals
 the implied curve tracks the hidden `P(on | t, θ)`, the agent recovered the
 **structure of the world**, not just a lucky θ̂.
 
+Read that number against chance, and read it in a band. The width grid is
+coarse, so with finite data the posterior legitimately splits between the
+`3.0` and `3.5` columns: exact-match mass on `σ = 3` can *fall* while the fit
+is improving. The reported check is therefore mass within one grid step of
+`σ = 3`, printed next to the mass an unlearned uniform posterior already puts
+in the same band (`33%`). A pooled run that clears chance by a wide margin is
+evidence; a bare percentage on its own is not.
+
+μ ranges over the stated answer support `{4, …, 27}`, not all 32 slots. The
+support is task framing the room states up front, so withholding it would only
+add an answer-space handicap on top of the discovery problem. Looks stay
+unrestricted across all 32 slots; only the terminal estimate is constrained.
+
 Optional pooling: after a guess, training rooms may reveal θ. The agent
 updates a prior over **shape only** `(σ, a, b)` — “how this kind of lamp
 behaves” — then on a new room infers a new peak. That is the organic
 cross-episode step. RL typically updates “where to click next”; this model
 updates “how the light is generated.”
+
+Pooling buys **shape**, not localization. Over 32 training rooms the width
+posterior concentrates hard (mass near `σ = 3` around `96%` against `33%`
+chance), but on held-out rooms peak error does not improve: a paired run of
+100 episodes at budget 8 puts pooled at `2.48` mean absolute error against
+`1.77` in-episode, a `+0.71` slot difference that is not significant
+(`SE 0.46`). Claim the width recovery. Do not claim pooling makes it a better
+guesser until a larger run says so.
 
 ```bash
 uv run light-learning compare --budget 4 --budget 8
@@ -102,6 +123,13 @@ uv run light-learning compare --budget 4 --budget 8
 `oracle_mle` = open-book peak location. `basic_rl_reinforce` = policy
 learning. `emergent_*` = closed-book world model. This comparison is **not**
 the official evaluator table.
+
+It also defaults to `profile="pilot"`, which is **10 episodes per cell**. That
+is a smoke test, not a ranking: at that sample size the per-condition MAEs move
+by whole slots between seeds and routinely put the conditions in the wrong
+order. Read it as “everything runs and nothing crashed.” Use `profile="full"`
+(100 episodes) before drawing any conclusion about which agent is better, and
+note the output is labelled `reportable: false` for exactly this reason.
 
 ## What is implemented here
 
@@ -113,7 +141,8 @@ the official evaluator table.
 - English explainer at `src/light_learning/web/`.
 
 Normative specs: [`docs/baseline-build-spec.md`](docs/baseline-build-spec.md),
-[`docs/evaluator-build-spec.md`](docs/evaluator-build-spec.md).
+[`docs/evaluator-build-spec.md`](docs/evaluator-build-spec.md),
+[`docs/emergent-world-model.md`](docs/emergent-world-model.md).
 
 ## Interactive explainer
 
@@ -121,7 +150,6 @@ Do **not** run `python -m http.server` from the repo root (that 404 is the
 stdlib file server; there is no `index.html` at the root).
 
 ```bash
-git checkout feat/baselines-and-explainer
 uv sync --extra dev
 uv run light-learning web
 ```
@@ -163,14 +191,16 @@ records = run_evaluation(
 )
 ```
 
-A factory that accepts `policy_seed` gets an evaluator-owned seed independent
-of hidden θ. PPO: `train_ppo_suite(...)` then `PPORoomAgent`. Never train on
-held-out IDs or seeds (`assert_training_separation`).
+Agents supply `agent_id`, `agent_version`, `condition`, `start_episode(state)`,
+`act(state) -> AgentDecision`, and `run_metadata()`. `AgentDecision` must be
+`light_learning.types.AgentDecision`; anything else is scored as a protocol
+failure and driven through the documented fallback.
 
-Local LLM: `uv run light-learning preflight` (no auto-pull). Hand
-`LLMRoomAgent` to `run_evaluation`. Qualitative prompts measure in-context
-discovery; disclosed-likelihood is an ablation. Label information regimes
-faithfully.
+A factory that accepts `policy_seed` gets an evaluator-owned seed derived from
+the master seed, agent version, condition, budget, and episode ID — never from
+hidden θ or `episode_seed`. It is recorded in `metadata["policy_seed"]`, so a
+resumed run reproduces each episode without replaying the ones before it.
+
 The run directory holds `records.jsonl` (flushed per episode), `summary.json`,
 and `manifest.json`. Re-running the same `run_id` resumes and skips completed
 episodes; a mismatched manifest or duplicate records are rejected.
@@ -180,54 +210,13 @@ uv run light-learning validate-profiles
 uv run light-learning report evaluation-runs/mle-pilot/records.jsonl --output summary.json
 ```
 
-## Interactive explainer
+PPO: `train_ppo_suite(...)` then `PPORoomAgent`. Never train on held-out IDs or
+seeds (`assert_training_separation`).
 
-```bash
-uv sync --extra dev
-uv run light-learning web --port 8767
-```
-
-Open http://127.0.0.1:8767/ — it drives the same `RoomEnv` as the rest of the
-package. **Train RL** runs on-policy REINFORCE on `GymRoomEnv` and plots rolling
-MAE; **Run trained RL on this episode** compares that policy to oracle MLE only
-after you commit. This small REINFORCE trainer and its smoke-sample metrics are
-an explainer, not the reportable PPO benchmark.
-
-## Setup
-
-This project targets Python 3.12 and `uv`:
-
-```bash
-uv sync --extra dev --extra rl
-uv run pytest
-```
-
-The `rl` extra is separately declared so non-RL users can omit it; include it
-whenever you train PPO or run the complete test suite.
-
-`light_learning.ppo.train_ppo_suite(...)` defaults to the required four budgets
-and five independent training seeds, saves one checkpoint per run, and writes a
-manifest. The evaluator loads each checkpoint through `PPORoomAgent` and owns
-held-out episodes, `EpisodeRecord` construction, and all reported metrics. Use
-`assert_training_separation` to prove RL training IDs and seeds never overlap
-the held-out banks.
-
-The MLE agent requires an explicit evaluator-owned `query_seed` for each
-episode, supplied by the `policy_seed` factory contract above. It must be
-independent of the hidden room seed; this makes its uniform query schedule
-reproducible across retries and resumed runs.
-
-The local LLM experiment needs a running Ollama server and both requested
-models installed. The CLI never pulls models automatically. Check readiness
-first:
-
-```bash
-uv run light-learning preflight
-```
-
-After freeing sufficient disk space and installing a model yourself, hand the
-constructed `LLMRoomAgent` to `run_evaluation` as shown above. The evaluator
-owns pilot/full execution and run-directory output.
+Local LLM: `uv run light-learning preflight` (no auto-pull). Hand
+`LLMRoomAgent` to `run_evaluation`. Qualitative prompts measure in-context
+discovery; disclosed-likelihood is an ablation. Label information regimes
+faithfully.
 
 ## Experiment interpretation
 
@@ -237,12 +226,22 @@ disclosed-likelihood condition is an ablation over exactly one variable: both
 arms state the answer range, and only the disclosed arm supplies the Bernoulli
 likelihood.
 
-The oracle MLE and trained RL baselines have different information regimes;
-report their labels faithfully. In particular the three are not a ladder. Oracle
-MLE has the exact likelihood but zero task exposure and a deliberately
-non-adaptive uniform query schedule; PPO has large task exposure and an adaptive
-policy but no analytic knowledge of the likelihood. Oracle MLE is therefore not
-a performance ceiling: an adaptive querier using the same exact likelihood
-reaches MAE 2.54/1.23/0.55/0.30 at budgets 4/8/16/32 against passive uniform
-MLE's 3.62/2.33/1.24/0.59, so roughly a third to a half of the oracle MLE's
-error is query strategy rather than model knowledge.
+The baselines have different information regimes; report their labels
+faithfully. **The conditions are not a ladder.** Oracle MLE has the exact
+likelihood but zero task exposure and a deliberately non-adaptive uniform query
+schedule; PPO has large task exposure and an adaptive policy but no analytic
+knowledge of the likelihood; the emergent world-model has neither the formula
+nor task exposure, but does choose each look by information gain.
+
+Oracle MLE is therefore **not a performance ceiling**. An adaptive querier
+using the same exact likelihood reaches MAE 2.54/1.23/0.55/0.30 at budgets
+4/8/16/32 against passive uniform MLE's 3.62/2.33/1.24/0.59, so roughly a third
+to a half of the oracle MLE's error is query strategy rather than model
+knowledge. An adaptive agent scoring below oracle MLE has not out-known it; it
+has out-queried it. Read any table that ranks them with that in mind.
+
+Two separate claims live in the emergent condition, and they should be reported
+separately. **Structure recovery** — does the width posterior concentrate near
+`σ = 3` against its chance level — is the emergence result. **Peak accuracy** —
+mean absolute error on held-out rooms — is a different measurement, and pooling
+currently improves the first without improving the second.

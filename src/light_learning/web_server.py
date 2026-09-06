@@ -15,7 +15,9 @@ from .mle import PassiveUniformOracleMLE, likelihood_profile, run_mle_episode
 from .room import RoomEnv
 from .types import TerminalOutcome
 
-WEB_ROOT = Path(__file__).resolve().parent / "web"
+# Static assets live inside the Python package so an installed wheel can serve
+# the explainer without relying on a repository-relative path.
+WEB_ROOT = Path(__file__).resolve().with_name("web")
 _LOCK = threading.Lock()
 _SESSIONS: dict[str, dict] = {}
 _RL_BY_BUDGET: dict[int, dict] = {}
@@ -367,6 +369,9 @@ class Handler(SimpleHTTPRequestHandler):
             "background": meta.get("background"),
             "amplitude": meta.get("amplitude"),
             "sigma_mass_at_3": meta.get("sigma_mass_at_3"),
+            "sigma_mass_near_3": meta.get("sigma_mass_near_3"),
+            "sigma_mass_chance": meta.get("sigma_mass_chance"),
+            "mean_sigma": meta.get("mean_sigma"),
             "inferred_curve": meta.get("curve"),
             "curve": _curve(env.config, outcome.theta),
             "canonical_formula_disclosed": False,
@@ -396,6 +401,9 @@ def _emergent_public() -> dict:
         "budget": _EMERGENT["budget"],
         "n_episodes": _EMERGENT["n_episodes"],
         "sigma_mass_at_3": _EMERGENT["sigma_mass_at_3"],
+        "sigma_mass_near_3": _EMERGENT["sigma_mass_near_3"],
+        "sigma_mass_chance": _EMERGENT["sigma_mass_chance"],
+        "mean_sigma": _EMERGENT["mean_sigma"],
         "note": (
             "Pooled (sigma, a, b) from training rooms with revealed peaks. "
             "Compare on this page uses that prior if budgets match."
@@ -406,16 +414,22 @@ def _emergent_public() -> dict:
 def _pool_emergent(body: dict) -> dict:
     global _EMERGENT
     from .emergent import (
+        SIGMA_TOLERANCE,
         TRUE_SIGMA,
         EmergentBumpAgent,
         collect_labeled_episode,
         hypothesis_grid,
         pool_shape_log_prior,
+        posterior_mean_sigma,
         shape_posterior_mass,
+        sigma_mass_chance_level,
     )
 
     budget = int(body.get("budget", 8))
-    n_episodes = int(body.get("episodes", 8))
+    # 8 rooms is not enough evidence to separate the width columns: the pooled
+    # posterior lands on the wrong sigma about as often as the right one. 32 is
+    # the smallest pool that reliably clears chance in the band around sigma=3.
+    n_episodes = int(body.get("episodes", 32))
     seed = int(body.get("seed", 0))
     labeled = []
     for i in range(n_episodes):
@@ -426,10 +440,13 @@ def _pool_emergent(body: dict) -> dict:
             seed=3_000_000 + seed * 1000 + budget * 100 + i,
         )
         labeled.append((history, theta))
-    hyps = hypothesis_grid()
+    hyps = hypothesis_grid(RoomEnv(budget=budget).config)
     prior = pool_shape_log_prior(labeled, hyps)
     mass = shape_posterior_mass(
         [], hyps, sigma=TRUE_SIGMA, shape_log_prior=prior
+    )
+    near = shape_posterior_mass(
+        [], hyps, sigma=TRUE_SIGMA, atol=SIGMA_TOLERANCE, shape_log_prior=prior
     )
     with _LOCK:
         _EMERGENT = {
@@ -437,6 +454,9 @@ def _pool_emergent(body: dict) -> dict:
             "n_episodes": n_episodes,
             "prior": prior,
             "sigma_mass_at_3": mass,
+            "sigma_mass_near_3": near,
+            "sigma_mass_chance": sigma_mass_chance_level(hyps),
+            "mean_sigma": posterior_mean_sigma([], hyps, prior),
         }
     return _emergent_public()
 

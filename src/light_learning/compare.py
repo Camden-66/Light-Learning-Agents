@@ -167,7 +167,7 @@ def fit_pooled_prior(
         cursor += 1
     train_ids = [f"emergent-pool-{budget}-{i}" for i in range(n_episodes)]
     assert_training_separation(train_ids, used_seeds, heldout)
-    return pool_shape_log_prior(labeled, hypothesis_grid(config.slot_count))
+    return pool_shape_log_prior(labeled, hypothesis_grid(config))
 
 
 def run_organic_comparison(
@@ -207,7 +207,12 @@ def run_organic_comparison(
     report["agents"]["oracle_mle"] = {
         "mae": _mae(mle_records),
         "pattern": None,
-        "note": "Knows the canonical formula; upper-bound reference, not organic.",
+        "note": (
+            "Knows the canonical formula but queries passively and uniformly. "
+            "Not a performance ceiling: roughly a third to a half of its error "
+            "is query strategy, so an adaptive agent can beat it without "
+            "knowing more. Different information regime, not a ladder rung."
+        ),
     }
 
     def emergent_factory(*, policy_seed: int):
