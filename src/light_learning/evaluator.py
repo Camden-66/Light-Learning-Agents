@@ -1,8 +1,12 @@
 """Room benchmark evaluator.
 
-This module drives the shared ``RoomEnv`` contract, validates the shared
-``AgentDecision`` protocol, persists comparable records, and computes metrics.
-It intentionally does not implement PPO, MLE, or an Ollama client.
+This module owns episode definitions, the agent-driving loop, the fallback
+policy, episode records, metrics, and JSONL/summary/manifest artifacts.
+
+It owns no environment code: the canonical ``RoomConfig``, ``RoomEnv``,
+deterministic light draws, public ``RoomState``, and the documented fallback
+policy all come from :mod:`light_learning.room` and :mod:`light_learning.types`.
+It implements neither PPO, oracle MLE, nor an Ollama client.
 """
 
 from __future__ import annotations
@@ -11,159 +15,83 @@ import argparse
 import hashlib
 import inspect
 import json
-import math
 import statistics
 import time
 import uuid
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
-try:  # Works both as ``python Eval/eval.py`` and as a package import.
-    from .environment import (
-        BUDGETS,
-        SLOT_COUNT,
-        THETA_MAX,
-        THETA_MIN,
-        Observation,
-        RoomConfig,
-        RoomEnv,
-        RoomState,
-        deterministic_light_outcome,
-    )
-except ImportError:  # pragma: no cover - exercised by the CLI invocation.
-    from environment import (  # type: ignore[no-redef]
-        BUDGETS,
-        SLOT_COUNT,
-        THETA_MAX,
-        THETA_MIN,
-        Observation,
-        RoomConfig,
-        RoomEnv,
-        RoomState,
-        deterministic_light_outcome,
-    )
+from .config import BUDGETS, SLOT_COUNT, RoomConfig
+from .room import RoomEnv, fallback_estimate, fallback_observation_slot
+from .types import (
+    RECORD_SCHEMA_VERSION,
+    AgentDecision,
+    EpisodeDefinition,
+    EpisodeRecord,
+    Observation,
+    RoomState,
+    TerminalOutcome,
+)
 
+__all__ = [
+    "EVALUATOR_VERSION",
+    "RECORD_SCHEMA_VERSION",
+    "AgentDecision",
+    "EpisodeDefinition",
+    "EpisodeRecord",
+    "GymPolicyAdapter",
+    "InvalidAction",
+    "Observation",
+    "RoomState",
+    "TerminalOutcome",
+    "aggregate_metrics",
+    "assert_training_separation",
+    "configuration_digest",
+    "derive_policy_seed",
+    "evaluate_profile",
+    "load_episode_definitions",
+    "profile_master_seed",
+    "read_records",
+    "run_episode",
+    "run_evaluation",
+    "validate_profiles",
+    "write_records",
+    "write_summary",
+]
 
-EVALUATOR_VERSION = "evaluator-v2"
-RECORD_SCHEMA_VERSION = 2
+EVALUATOR_VERSION = "evaluator-v3"
 PROFILE_MANIFEST = Path(__file__).with_name("episode_profiles.v1.json")
+POLICY_SEED_NAMESPACE = "light-learning:policy-seed:v1"
+PRELIMINARY_PROFILES = frozenset({"pilot"})
+ARTIFACT_FLUSH_INTERVAL = 25
 
 
 class InvalidAction(ValueError):
     """Raised when an agent decision does not contain one valid integer action."""
 
 
-@dataclass(frozen=True)
-class AgentDecision:
-    """One agent response in the shared evaluator protocol."""
-
-    action: int
-    raw_response: str | None = None
-    thinking: str | None = None
-    rationale: str | None = None
-    latency_seconds: float = 0.0
-    fallback_used: bool = False
-    protocol_failure: bool = False
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if isinstance(self.action, bool) or not isinstance(self.action, int):
-            raise InvalidAction("AgentDecision.action must be an integer")
-        if self.raw_response is not None and not isinstance(self.raw_response, str):
-            raise ValueError("raw_response must be a string or None")
-        if self.thinking is not None and not isinstance(self.thinking, str):
-            raise ValueError("thinking must be a string or None")
-        if self.rationale is not None and not isinstance(self.rationale, str):
-            raise ValueError("rationale must be a string or None")
-        if not math.isfinite(self.latency_seconds) or self.latency_seconds < 0:
-            raise ValueError("latency_seconds must be a finite non-negative number")
-        if not isinstance(self.fallback_used, bool):
-            raise ValueError("fallback_used must be boolean")
-        if not isinstance(self.protocol_failure, bool):
-            raise ValueError("protocol_failure must be boolean")
-        if not isinstance(self.metadata, Mapping):
-            raise ValueError("metadata must be a mapping")
-        json.dumps(dict(self.metadata))
-
-
-@dataclass(frozen=True)
-class EpisodeDefinition:
-    episode_id: str
-    theta: int
-    episode_seed: int
-
-    def __post_init__(self) -> None:
-        if not self.episode_id:
-            raise ValueError("episode_id must not be empty")
-        if not THETA_MIN <= self.theta <= THETA_MAX:
-            raise ValueError(f"theta must be in [{THETA_MIN}, {THETA_MAX}]")
-        if self.episode_seed < 0:
-            raise ValueError("episode_seed must be non-negative")
-
-
-@dataclass
-class EpisodeRecord:
-    """The JSONL record persisted for every completed episode."""
-
-    agent_id: str
-    agent_version: str
-    condition: str
-    budget: int
-    episode_id: str
-    episode_seed: int
-    theta: int
-    theta_hat: int
-    absolute_error: int
-    reward: float
-    trace: list[dict[str, Any]]
-    completed: bool
-    protocol_failure: bool
-    fallback_used: bool
-    latency_seconds: float
-    metadata: dict[str, Any]
-    profile: str
-    profile_version: str
-    configuration_digest: str
-    training_seed: int | None = None
-    run_id: str | None = None
-    schema_version: int = RECORD_SCHEMA_VERSION
-
-    def __post_init__(self) -> None:
-        if not self.agent_id or not self.agent_version or not self.condition:
-            raise ValueError("agent_id, agent_version, and condition are required")
-        if self.budget not in BUDGETS:
-            raise ValueError(f"budget must be one of {BUDGETS}")
-        if not THETA_MIN <= self.theta <= THETA_MAX:
-            raise ValueError("theta is outside the canonical hidden range")
-        if not 0 <= self.theta_hat < SLOT_COUNT:
-            raise ValueError("theta_hat must be a room slot")
-        if self.absolute_error != abs(self.theta - self.theta_hat):
-            raise ValueError("absolute_error does not match theta and theta_hat")
-        expected_reward = -self.absolute_error / (SLOT_COUNT - 1)
-        if not math.isclose(self.reward, expected_reward, rel_tol=0, abs_tol=1e-12):
-            raise ValueError("reward does not match absolute_error")
-        if len(self.trace) != self.budget + 1:
-            raise ValueError("trace must contain B observations and one terminal decision")
-        if self.latency_seconds < 0 or not math.isfinite(self.latency_seconds):
-            raise ValueError("latency_seconds must be finite and non-negative")
-        json.dumps(self.to_dict())
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "EpisodeRecord":
-        return cls(**dict(value))
+# --------------------------------------------------------------------------
+# Profiles and reproducible episode definitions
+# --------------------------------------------------------------------------
 
 
 def configuration_digest(configuration: Mapping[str, Any]) -> str:
+    """Return a stable digest of an agent's evaluated configuration."""
+
     encoded = json.dumps(
         configuration, sort_keys=True, separators=(",", ":"), default=str
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _jsonable(value: Any) -> Any:
+    """Round-trip through JSON so tuples compare equal to their stored lists."""
+
+    return json.loads(json.dumps(value, default=str))
 
 
 def _manifest(manifest_path: str | Path = PROFILE_MANIFEST) -> dict[str, Any]:
@@ -186,11 +114,31 @@ def profile_master_seed(
     return int(manifest["master_seed"])
 
 
-def load_episode_definitions(
-    profile: str, manifest_path: str | Path = PROFILE_MANIFEST
-) -> tuple[str, dict[int, list[EpisodeDefinition]]]:
-    """Create deterministic theta-stratified definitions from the master seed."""
+def _evenly_spaced(candidates: Sequence[int], count: int) -> list[int]:
+    """Pick ``count`` candidates spread across the whole range, endpoints included.
 
+    A profile with fewer episodes than theta values must still probe the entire
+    hidden range, otherwise the worst-theta slice only ever sees a lopsided
+    subset of the room.
+    """
+
+    if count >= len(candidates):
+        return list(candidates)
+    if count == 1:
+        return [candidates[0]]
+    last = len(candidates) - 1
+    return [candidates[round(index * last / (count - 1))] for index in range(count)]
+
+
+def load_episode_definitions(
+    profile: str,
+    manifest_path: str | Path = PROFILE_MANIFEST,
+    *,
+    config: RoomConfig | None = None,
+) -> tuple[str, dict[int, list[EpisodeDefinition]]]:
+    """Create deterministic, theta-stratified definitions from the master seed."""
+
+    config = config or RoomConfig()
     manifest = _manifest(manifest_path)
     if profile not in manifest["profiles"]:
         raise ValueError(f"unknown evaluation profile: {profile!r}")
@@ -199,8 +147,9 @@ def load_episode_definitions(
     version = str(spec["version"])
     master_seed = int(manifest["master_seed"])
 
+    pool = _evenly_spaced(config.theta_candidates, count)
     theta_order = sorted(
-        range(THETA_MIN, THETA_MAX + 1),
+        pool,
         key=lambda theta: hashlib.sha256(
             f"{master_seed}|{profile}|theta|{theta}".encode()
         ).digest(),
@@ -209,7 +158,7 @@ def load_episode_definitions(
     for budget in BUDGETS:
         episodes: list[EpisodeDefinition] = []
         for index in range(count):
-            theta = theta_order[index % len(theta_order)]
+            theta = config.validate_theta(theta_order[index % len(theta_order)])
             digest = hashlib.sha256(
                 f"{master_seed}|{profile}|budget={budget}|episode={index}".encode()
             ).digest()
@@ -228,7 +177,9 @@ def assert_training_separation(
     """Reject any overlap between RL training cases and held-out cases."""
 
     heldout_ids = {episode.episode_id for cases in definitions.values() for episode in cases}
-    heldout_seeds = {episode.episode_seed for cases in definitions.values() for episode in cases}
+    heldout_seeds = {
+        episode.episode_seed for cases in definitions.values() for episode in cases
+    }
     duplicate_ids = heldout_ids.intersection(training_episode_ids)
     duplicate_seeds = heldout_seeds.intersection(training_episode_seeds)
     if duplicate_ids or duplicate_seeds:
@@ -238,20 +189,57 @@ def assert_training_separation(
         )
 
 
-def room_state_to_gym_observation(state: RoomState) -> tuple[float, ...]:
-    """Adapt a public RoomState to the 66-value PPO observation when needed."""
+# --------------------------------------------------------------------------
+# Agent-policy seeding
+# --------------------------------------------------------------------------
 
-    on_counts = [0] * SLOT_COUNT
-    visit_counts = [0] * SLOT_COUNT
-    for observation in state.history:
-        visit_counts[observation.time_slot] += 1
-        on_counts[observation.time_slot] += int(observation.light_on)
-    denominator = state.budget
-    return tuple(
-        [count / denominator for count in on_counts]
-        + [count / denominator for count in visit_counts]
-        + [state.remaining_observations / denominator, float(state.phase == "estimate")]
+
+def derive_policy_seed(
+    *,
+    master_seed: int,
+    agent_version: str,
+    condition: str,
+    budget: int,
+    episode_id: str,
+) -> int:
+    """Derive one episode's agent-policy seed from public inputs only.
+
+    Deliberately excludes the hidden ``theta`` and ``episode_seed``: a stochastic
+    agent must never be able to correlate its own randomness with the room's.
+    Because every input is stable per episode, a resumed run reproduces the same
+    seed without replaying earlier episodes.
+    """
+
+    payload = (
+        f"{POLICY_SEED_NAMESPACE}:{master_seed}:{agent_version}:"
+        f"{condition}:{budget}:{episode_id}"
+    ).encode("utf-8")
+    return int.from_bytes(
+        hashlib.blake2b(payload, digest_size=8).digest(), byteorder="big", signed=False
     )
+
+
+def _accepts_policy_seed(agent_factory: Callable[..., Any]) -> bool:
+    """Report whether a factory wants the evaluator-owned policy seed."""
+
+    try:
+        signature = inspect.signature(agent_factory)
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "policy_seed" and parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return True
+    return False
+
+
+# --------------------------------------------------------------------------
+# Agent adapters and protocol validation
+# --------------------------------------------------------------------------
 
 
 def _strict_action(value: Any) -> int:
@@ -267,18 +255,47 @@ def _strict_action(value: Any) -> int:
     return value
 
 
-class GymPolicyAdapter:
-    """Adapter for a deterministic SB3-style ``predict`` policy."""
+def _validate_decision(decision: AgentDecision) -> None:
+    """Enforce the diagnostic contract on a returned decision."""
 
-    def __init__(self, policy: Any):
+    for name in ("raw_response", "thinking", "rationale"):
+        value = getattr(decision, name)
+        if value is not None and not isinstance(value, str):
+            raise InvalidAction(f"{name} must be a string or None")
+    latency = decision.latency_seconds
+    if isinstance(latency, bool) or not isinstance(latency, (int, float)):
+        raise InvalidAction("latency_seconds must be a number")
+    if not isfinite(latency) or latency < 0:
+        raise InvalidAction("latency_seconds must be finite and non-negative")
+    if not isinstance(decision.fallback_used, bool):
+        raise InvalidAction("fallback_used must be boolean")
+    if not isinstance(decision.protocol_failure, bool):
+        raise InvalidAction("protocol_failure must be boolean")
+    if not isinstance(decision.metadata, Mapping):
+        raise InvalidAction("metadata must be a mapping")
+    json.dumps(dict(decision.metadata))
+
+
+class GymPolicyAdapter:
+    """Adapter for a deterministic SB3-style ``predict`` policy.
+
+    ``PPORoomAgent`` already implements the agent protocol directly; this exists
+    only for bare policies that expose nothing but ``predict``.
+    """
+
+    def __init__(self, policy: Any, *, config: RoomConfig | None = None):
         self.policy = policy
+        self.config = config or RoomConfig()
 
     def start_episode(self, state: RoomState) -> None:
         del state
 
     def act(self, state: RoomState) -> AgentDecision:
+        from .ppo import room_state_vector
+
         started = time.perf_counter()
-        raw = self.policy.predict(room_state_to_gym_observation(state), deterministic=True)
+        observation = room_state_vector(state, config=self.config)
+        raw = self.policy.predict(observation, deterministic=True)
         action_value = raw[0] if isinstance(raw, tuple) and len(raw) == 2 else raw
         action = _strict_action(action_value)
         return AgentDecision(
@@ -292,6 +309,8 @@ class GymPolicyAdapter:
 
 
 class _ConstructionFailureAgent:
+    """Stand-in that turns agent construction failure into a scored episode."""
+
     def __init__(
         self,
         error: Exception,
@@ -327,6 +346,29 @@ def _adapt_agent(agent: Any) -> Any:
     raise TypeError("agent must implement start_episode/act or expose SB3 predict")
 
 
+def _construct_agent(
+    agent_factory: Callable[..., Any],
+    *,
+    policy_seed: int | None,
+    agent_id: str | None,
+    agent_version: str | None,
+    condition: str | None,
+) -> Any:
+    """Build one agent, converting any failure into a scorable stand-in."""
+
+    try:
+        if policy_seed is not None and _accepts_policy_seed(agent_factory):
+            return _adapt_agent(agent_factory(policy_seed=policy_seed))
+        return _adapt_agent(agent_factory())
+    except Exception as error:
+        return _ConstructionFailureAgent(
+            error,
+            agent_id=agent_id,
+            agent_version=agent_version,
+            condition=condition,
+        )
+
+
 def _identity(
     agent: Any,
     *,
@@ -344,23 +386,20 @@ def _identity(
     return values  # type: ignore[return-value]
 
 
-def _fallback_observation(state: RoomState) -> int:
-    visits = [0] * SLOT_COUNT
-    for observation in state.history:
-        visits[observation.time_slot] += 1
-    return min(range(SLOT_COUNT), key=lambda slot: (visits[slot], slot))
+def _agent_metadata(agent: Any) -> dict[str, Any]:
+    getter = getattr(agent, "run_metadata", None)
+    if getter is None:
+        raise TypeError("agent must implement run_metadata()")
+    value = getter()
+    if not isinstance(value, Mapping):
+        raise TypeError("run_metadata() must return a mapping")
+    json.dumps(dict(value), default=str)
+    return dict(value)
 
 
-def _fallback_estimate(state: RoomState) -> int:
-    if not state.history:
-        return 16
-    grouped: dict[int, list[bool]] = defaultdict(list)
-    for observation in state.history:
-        grouped[observation.time_slot].append(observation.light_on)
-    return max(
-        sorted(grouped),
-        key=lambda slot: sum(grouped[slot]) / len(grouped[slot]),
-    )
+# --------------------------------------------------------------------------
+# Episode loop
+# --------------------------------------------------------------------------
 
 
 def _decision_trace(
@@ -369,6 +408,7 @@ def _decision_trace(
     action: int,
     phase: str,
     latency_seconds: float,
+    measured_latency_seconds: float,
     fallback_used: bool,
     protocol_failure: bool,
     outcome: Observation | None = None,
@@ -380,6 +420,7 @@ def _decision_trace(
         "thinking": decision.thinking if decision else None,
         "rationale": decision.rationale if decision else None,
         "decision_latency_seconds": latency_seconds,
+        "measured_latency_seconds": measured_latency_seconds,
         "fallback_used": fallback_used,
         "protocol_failure": protocol_failure,
         "metadata": dict(decision.metadata) if decision else {},
@@ -393,17 +434,6 @@ def _decision_trace(
             }
         )
     return value
-
-
-def _agent_metadata(agent: Any) -> dict[str, Any]:
-    getter = getattr(agent, "run_metadata", None)
-    if getter is None:
-        raise TypeError("agent must implement run_metadata()")
-    value = getter()
-    if not isinstance(value, Mapping):
-        raise TypeError("run_metadata() must return a mapping")
-    json.dumps(dict(value), default=str)
-    return dict(value)
 
 
 def run_episode(
@@ -420,14 +450,14 @@ def run_episode(
     configuration: Mapping[str, Any] | None = None,
     training_seed: int | None = None,
     run_id: str | None = None,
+    policy_seed: int | None = None,
     runtime_metadata: Mapping[str, Any] | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> EpisodeRecord:
-    """Run exactly B observations and one terminal estimate."""
+    """Run exactly ``budget`` observations and one terminal estimate."""
 
-    if budget not in BUDGETS:
-        raise ValueError(f"budget must be one of {BUDGETS}")
     config = config or RoomConfig()
+    budget = config.validate_budget(budget)
     configuration = configuration or {}
     try:
         agent = _adapt_agent(agent)
@@ -470,31 +500,33 @@ def run_episode(
             try:
                 raw_decision = agent.act(state)
                 if not isinstance(raw_decision, AgentDecision):
-                    raise TypeError("agent.act() must return AgentDecision")
+                    raise TypeError(
+                        "agent.act() must return light_learning.types.AgentDecision"
+                    )
+                _validate_decision(raw_decision)
                 decision = raw_decision
                 action = _strict_action(decision.action)
                 decision_failure = decision.protocol_failure
                 used_fallback = decision.fallback_used
-                decision_latency = decision.latency_seconds
+                decision_latency = float(decision.latency_seconds)
             except Exception as error:
-                action = _fallback_observation(state)
+                action = fallback_observation_slot(state, config)
                 decision_failure = True
                 used_fallback = True
-                protocol_failure = True
                 decision_latency = clock() - started
                 decision = AgentDecision(
                     action=action,
-                    raw_response=None,
                     metadata={"error": f"{type(error).__name__}: {error}"},
                     latency_seconds=decision_latency,
                     fallback_used=True,
                     protocol_failure=True,
                 )
         else:
-            action = _fallback_observation(state)
+            action = fallback_observation_slot(state, config)
             decision_failure = True
             used_fallback = True
             decision_latency = 0.0
+        measured = clock() - started
 
         if decision_failure:
             protocol_failure = True
@@ -502,15 +534,15 @@ def run_episode(
             fallback_used = True
         latency_seconds += decision_latency
         state = env.observe(action)
-        observation = state.history[-1]
         event = _decision_trace(
             decision,
             action=action,
             phase="observe",
             latency_seconds=decision_latency,
+            measured_latency_seconds=measured,
             fallback_used=used_fallback,
             protocol_failure=decision_failure,
-            outcome=observation,
+            outcome=state.history[-1],
         )
         event["step"] = len(trace)
         trace.append(event)
@@ -523,17 +555,19 @@ def run_episode(
         try:
             raw_decision = agent.act(state)
             if not isinstance(raw_decision, AgentDecision):
-                raise TypeError("agent.act() must return AgentDecision")
+                raise TypeError(
+                    "agent.act() must return light_learning.types.AgentDecision"
+                )
+            _validate_decision(raw_decision)
             decision = raw_decision
             theta_hat = _strict_action(decision.action)
             decision_failure = decision.protocol_failure
             used_fallback = decision.fallback_used
-            decision_latency = decision.latency_seconds
+            decision_latency = float(decision.latency_seconds)
         except Exception as error:
-            theta_hat = _fallback_estimate(state)
+            theta_hat = fallback_estimate(state, config)
             decision_failure = True
             used_fallback = True
-            protocol_failure = True
             decision_latency = clock() - started
             decision = AgentDecision(
                 action=theta_hat,
@@ -543,10 +577,11 @@ def run_episode(
                 protocol_failure=True,
             )
     else:
-        theta_hat = _fallback_estimate(state)
+        theta_hat = fallback_estimate(state, config)
         decision_failure = True
         used_fallback = True
         decision_latency = 0.0
+    measured = clock() - started
 
     if decision_failure:
         protocol_failure = True
@@ -559,6 +594,7 @@ def run_episode(
         action=theta_hat,
         phase="estimate",
         latency_seconds=decision_latency,
+        measured_latency_seconds=measured,
         fallback_used=used_fallback,
         protocol_failure=decision_failure,
     )
@@ -580,6 +616,8 @@ def run_episode(
         metadata = {"run_metadata_error": f"{type(error).__name__}: {error}"}
     if start_error:
         metadata["start_episode_error"] = start_error
+    if policy_seed is not None:
+        metadata["policy_seed"] = policy_seed
     if runtime_metadata:
         metadata.update(dict(runtime_metadata))
     return EpisodeRecord(
@@ -593,7 +631,7 @@ def run_episode(
         theta_hat=terminal.theta_hat,
         absolute_error=terminal.absolute_error,
         reward=terminal.reward,
-        trace=trace,
+        trace=tuple(trace),
         completed=True,
         protocol_failure=protocol_failure,
         fallback_used=fallback_used,
@@ -608,11 +646,12 @@ def run_episode(
 
 
 def _iter_profile_records(
-    agent_factory: Callable[[], Any],
+    agent_factory: Callable[..., Any],
     *,
     profile: str,
     definitions: Mapping[int, Sequence[EpisodeDefinition]],
     config: RoomConfig,
+    master_seed: int,
     agent_id: str | None,
     agent_version: str | None,
     condition: str | None,
@@ -623,6 +662,12 @@ def _iter_profile_records(
     skip_keys: set[tuple[str, int, str, str, str]],
     profile_version: str,
 ) -> Iterator[EpisodeRecord]:
+    seeded = _accepts_policy_seed(agent_factory)
+    if seeded and not (agent_version and condition):
+        raise ValueError(
+            "agent_version and condition must be supplied when the agent factory "
+            "accepts a policy_seed, because the seed is derived from them"
+        )
     for budget in BUDGETS:
         for episode in definitions[budget]:
             if agent_id and agent_version and condition:
@@ -635,15 +680,24 @@ def _iter_profile_records(
                 )
                 if expected_key in skip_keys:
                     continue
-            try:
-                agent = _adapt_agent(agent_factory())
-            except Exception as error:
-                agent = _ConstructionFailureAgent(
-                    error,
-                    agent_id=agent_id,
-                    agent_version=agent_version,
-                    condition=condition,
+            policy_seed = (
+                derive_policy_seed(
+                    master_seed=master_seed,
+                    agent_version=agent_version,  # type: ignore[arg-type]
+                    condition=condition,  # type: ignore[arg-type]
+                    budget=budget,
+                    episode_id=episode.episode_id,
                 )
+                if seeded
+                else None
+            )
+            agent = _construct_agent(
+                agent_factory,
+                policy_seed=policy_seed,
+                agent_id=agent_id,
+                agent_version=agent_version,
+                condition=condition,
+            )
             resolved_id, resolved_version, resolved_condition = _identity(
                 agent,
                 agent_id=agent_id,
@@ -672,12 +726,13 @@ def _iter_profile_records(
                 configuration=configuration,
                 training_seed=training_seed,
                 run_id=run_id,
+                policy_seed=policy_seed,
                 runtime_metadata=runtime_metadata,
             )
 
 
 def evaluate_profile(
-    agent_factory: Callable[[], Any],
+    agent_factory: Callable[..., Any],
     *,
     profile: str = "full",
     config: RoomConfig | None = None,
@@ -692,13 +747,17 @@ def evaluate_profile(
 ) -> list[EpisodeRecord]:
     """Evaluate all four budgets using one fixed versioned profile."""
 
-    profile_version, definitions = load_episode_definitions(profile, manifest_path)
-    records = list(
+    config = config or RoomConfig()
+    profile_version, definitions = load_episode_definitions(
+        profile, manifest_path, config=config
+    )
+    return list(
         _iter_profile_records(
             agent_factory,
             profile=profile,
             definitions=definitions,
-            config=config or RoomConfig(),
+            config=config,
+            master_seed=profile_master_seed(profile, manifest_path),
             agent_id=agent_id,
             agent_version=agent_version,
             condition=condition,
@@ -710,7 +769,11 @@ def evaluate_profile(
             profile_version=profile_version,
         )
     )
-    return records
+
+
+# --------------------------------------------------------------------------
+# Artifacts
+# --------------------------------------------------------------------------
 
 
 def _record_key(record: EpisodeRecord) -> tuple[str, int, str, str, str]:
@@ -744,11 +807,15 @@ def read_records(paths: Iterable[str | Path]) -> list[EpisodeRecord]:
                 try:
                     records.append(EpisodeRecord.from_dict(json.loads(line)))
                 except Exception as error:
-                    raise ValueError(f"invalid record at {path}:{line_number}: {error}") from error
+                    raise ValueError(
+                        f"invalid record at {path}:{line_number}: {error}"
+                    ) from error
     return records
 
 
-def _metrics(records: Sequence[EpisodeRecord], *, scope: str, seed: int | None) -> dict[str, Any]:
+def _metrics(
+    records: Sequence[EpisodeRecord], *, scope: str, seed: int | None
+) -> dict[str, Any]:
     if not records:
         raise ValueError("cannot compute metrics for an empty cell")
     errors = [record.absolute_error for record in records]
@@ -759,7 +826,7 @@ def _metrics(records: Sequence[EpisodeRecord], *, scope: str, seed: int | None) 
         (theta, statistics.fmean(values), len(values))
         for theta, values in sorted(by_theta.items())
     ]
-    # Sorted theta order makes max's first-equal behavior the required tie break.
+    # Ascending theta order makes max's first-equal behaviour the required tie break.
     worst_theta, worst_mae, worst_count = max(slices, key=lambda item: item[1])
     return {
         "agent_id": records[0].agent_id,
@@ -784,7 +851,7 @@ def _metrics(records: Sequence[EpisodeRecord], *, scope: str, seed: int | None) 
         "worst_theta_slice_mae": worst_mae,
         "worst_theta": worst_theta,
         "worst_theta_group_size": worst_count,
-        "worst_theta_slice_preliminary": records[0].profile == "pilot",
+        "worst_theta_slice_preliminary": records[0].profile in PRELIMINARY_PROFILES,
         "configuration_digests": sorted(
             {record.configuration_digest for record in records}
         ),
@@ -792,7 +859,9 @@ def _metrics(records: Sequence[EpisodeRecord], *, scope: str, seed: int | None) 
 
 
 def aggregate_metrics(records: Iterable[EpisodeRecord]) -> list[dict[str, Any]]:
-    groups: dict[tuple[str, str, str, str, str, int], list[EpisodeRecord]] = defaultdict(list)
+    """Group records into evaluation cells and compute every required metric."""
+
+    groups: dict[tuple[Any, ...], list[EpisodeRecord]] = defaultdict(list)
     for record in records:
         groups[
             (
@@ -805,10 +874,12 @@ def aggregate_metrics(records: Iterable[EpisodeRecord]) -> list[dict[str, Any]]:
             )
         ].append(record)
     reports: list[dict[str, Any]] = []
-    for key in sorted(groups):
+    for key in sorted(groups, key=lambda item: tuple(str(part) for part in item)):
         group = groups[key]
         reports.append(_metrics(group, scope="aggregate", seed=None))
-        for seed in sorted({record.training_seed for record in group if record.training_seed is not None}):
+        for seed in sorted(
+            {record.training_seed for record in group if record.training_seed is not None}
+        ):
             reports.append(
                 _metrics(
                     [record for record in group if record.training_seed == seed],
@@ -836,7 +907,7 @@ def _utc_now() -> str:
 
 
 def run_evaluation(
-    agent_factory: Callable[[], Any],
+    agent_factory: Callable[..., Any],
     *,
     output_dir: str | Path,
     run_id: str | None = None,
@@ -853,17 +924,22 @@ def run_evaluation(
 ) -> list[EpisodeRecord]:
     """Run, persist, summarize, and optionally resume one evaluation run."""
 
-    profile_version, definitions = load_episode_definitions(profile, manifest_path)
-    master_seed = profile_master_seed(profile, manifest_path)
     config = config or RoomConfig()
+    profile_version, definitions = load_episode_definitions(
+        profile, manifest_path, config=config
+    )
+    master_seed = profile_master_seed(profile, manifest_path)
     configuration = configuration or {}
     output_root = Path(output_dir)
-    run_id = run_id or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+    run_id = run_id or (
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+    )
     run_root = output_root / run_id
     records_path = run_root / "records.jsonl"
     summary_path = run_root / "summary.json"
     manifest_output = run_root / "manifest.json"
     run_root.mkdir(parents=True, exist_ok=True)
+    room_config = _jsonable(asdict(config))
 
     existing: list[EpisodeRecord] = []
     if resume and records_path.exists():
@@ -878,7 +954,7 @@ def run_evaluation(
             "profile": profile,
             "profile_version": profile_version,
             "master_seed": master_seed,
-            "room_config": asdict(config),
+            "room_config": room_config,
         }
         for field_name, expected_value in expected.items():
             if previous.get(field_name) != expected_value:
@@ -890,13 +966,12 @@ def run_evaluation(
         previous_digest = previous_agent.get("configuration_digest")
         if previous_digest and previous_digest != configuration_digest(configuration):
             raise ValueError("run manifest mismatch for agent configuration")
-        previous_training_seed = previous_agent.get("training_seed")
-        if previous_training_seed != training_seed:
+        if previous_agent.get("training_seed") != training_seed:
             raise ValueError("run manifest mismatch for training_seed")
     elif existing:
         raise ValueError("records exist without a manifest; cannot safely resume")
 
-    manifest_data = {
+    manifest_data: dict[str, Any] = {
         "evaluator_version": EVALUATOR_VERSION,
         "schema_version": RECORD_SCHEMA_VERSION,
         "run_id": run_id,
@@ -907,7 +982,7 @@ def run_evaluation(
         "profile_version": profile_version,
         "profile_status": _manifest(manifest_path)["profiles"][profile].get("status"),
         "master_seed": master_seed,
-        "room_config": asdict(config),
+        "room_config": room_config,
         "expected_episode_count": sum(len(cases) for cases in definitions.values()),
         "completed_episode_count": len(existing),
         "agent": {
@@ -919,9 +994,16 @@ def run_evaluation(
             "training_seed": training_seed,
         },
     }
-    manifest_output.write_text(
-        json.dumps(manifest_data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+
+    def flush_manifest(status: str, completed: int) -> None:
+        manifest_data["status"] = status
+        manifest_data["completed_episode_count"] = completed
+        manifest_data["updated_at"] = _utc_now()
+        manifest_output.write_text(
+            json.dumps(manifest_data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+    flush_manifest("running", len(existing))
 
     existing_keys = {_record_key(record) for record in existing}
     new_records: list[EpisodeRecord] = []
@@ -930,6 +1012,7 @@ def run_evaluation(
         profile=profile,
         definitions=definitions,
         config=config,
+        master_seed=master_seed,
         agent_id=agent_id,
         agent_version=agent_version,
         condition=condition,
@@ -940,15 +1023,14 @@ def run_evaluation(
         skip_keys=existing_keys,
         profile_version=profile_version,
     ):
+        # Records are the durable artifact, so they are flushed every episode.
+        # The derived summary/manifest are refreshed on an interval instead.
         write_records(records_path, [record], mode="a" if existing or new_records else "w")
         new_records.append(record)
-        current_records = existing + new_records
-        write_summary(summary_path, aggregate_metrics(current_records))
-        manifest_data["completed_episode_count"] = len(current_records)
-        manifest_data["updated_at"] = _utc_now()
-        manifest_output.write_text(
-            json.dumps(manifest_data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        if len(new_records) % ARTIFACT_FLUSH_INTERVAL == 0:
+            write_summary(summary_path, aggregate_metrics(existing + new_records))
+            flush_manifest("running", len(existing) + len(new_records))
+
     records = existing + new_records
     if records:
         manifest_data["agent"].update(
@@ -959,21 +1041,26 @@ def run_evaluation(
                 "metadata": records[0].metadata,
             }
         )
-    write_summary(summary_path, aggregate_metrics(records))
-    manifest_data["status"] = "complete"
-    manifest_data["completed_episode_count"] = len(records)
-    manifest_data["updated_at"] = _utc_now()
-    manifest_output.write_text(
-        json.dumps(manifest_data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_summary(summary_path, aggregate_metrics(records) if records else [])
+    flush_manifest("complete", len(records))
     return records
 
 
-def _validate_profiles(manifest_path: str | Path = PROFILE_MANIFEST) -> dict[str, Any]:
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+
+def validate_profiles(manifest_path: str | Path = PROFILE_MANIFEST) -> dict[str, Any]:
+    """Check that both profiles are deterministic, unique, and stratified."""
+
     manifest = _manifest(manifest_path)
+    config = RoomConfig()
     result: dict[str, Any] = {"master_seed": manifest["master_seed"]}
     for profile, expected in (("pilot", 10), ("full", 100)):
-        version, definitions = load_episode_definitions(profile, manifest_path)
+        version, definitions = load_episode_definitions(
+            profile, manifest_path, config=config
+        )
         all_episodes = [episode for cases in definitions.values() for episode in cases]
         if any(len(cases) != expected for cases in definitions.values()):
             raise ValueError(f"{profile} has the wrong episodes-per-budget count")
@@ -986,10 +1073,14 @@ def _validate_profiles(manifest_path: str | Path = PROFILE_MANIFEST) -> dict[str
             "status": manifest["profiles"][profile].get("status"),
             "episodes_per_budget": expected,
             "total_episodes": len(all_episodes),
+            "distinct_theta_values": len({episode.theta for episode in all_episodes}),
             "theta_counts_by_budget": {
                 str(budget): {
-                    str(theta): sum(episode.theta == theta for episode in definitions[budget])
-                    for theta in range(THETA_MIN, THETA_MAX + 1)
+                    str(theta): sum(
+                        episode.theta == theta for episode in definitions[budget]
+                    )
+                    for theta in config.theta_candidates
+                    if any(episode.theta == theta for episode in definitions[budget])
                 }
                 for budget in BUDGETS
             },
@@ -998,16 +1089,18 @@ def _validate_profiles(manifest_path: str | Path = PROFILE_MANIFEST) -> dict[str
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Room benchmark evaluator.")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    validate = subparsers.add_parser("validate-profiles")
+    validate = subparsers.add_parser(
+        "validate-profiles", help="check profile determinism and stratification"
+    )
     validate.add_argument("--manifest", default=str(PROFILE_MANIFEST))
-    report = subparsers.add_parser("report")
+    report = subparsers.add_parser("report", help="summarize JSONL episode records")
     report.add_argument("records", nargs="+")
     report.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     if args.command == "validate-profiles":
-        print(json.dumps(_validate_profiles(args.manifest), indent=2, sort_keys=True))
+        print(json.dumps(validate_profiles(args.manifest), indent=2, sort_keys=True))
         return 0
     write_summary(args.output, aggregate_metrics(read_records(args.records)))
     return 0

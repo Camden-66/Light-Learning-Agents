@@ -4,7 +4,7 @@
   "budgets": [4, 8, 16, 32],
   "profiles": {
     "pilot": {
-      "version": "room-v1-pilot-v2",
+      "version": "room-v1-pilot-v3",
       "episodes_per_budget": 10,
       "status": "preliminary"
     },

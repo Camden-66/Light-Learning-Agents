@@ -1,4 +1,4 @@
-"""Operational checks for local LLM setup; evaluation execution is teammate-owned."""
+"""Operational checks for local LLM setup and evaluation-artifact commands."""
 
 from __future__ import annotations
 
@@ -56,6 +56,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     web_parser = subparsers.add_parser("web", help="interactive RoomEnv explainer")
     web_parser.add_argument("--host", default="127.0.0.1")
     web_parser.add_argument("--port", type=int, default=8767)
+    validate_parser = subparsers.add_parser(
+        "validate-profiles",
+        help="check evaluation profile determinism and theta stratification",
+    )
+    validate_parser.add_argument("--manifest", default=None)
+    report_parser = subparsers.add_parser(
+        "report", help="summarize JSONL episode records into a metrics summary"
+    )
+    report_parser.add_argument("records", nargs="+")
+    report_parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
 
     if args.command == "preflight":
@@ -69,6 +79,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .web_server import serve
 
         serve(host=args.host, port=args.port)
+        return 0
+    if args.command == "validate-profiles":
+        from .evaluator import PROFILE_MANIFEST, validate_profiles
+
+        result = validate_profiles(args.manifest or PROFILE_MANIFEST)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if args.command == "report":
+        from .evaluator import aggregate_metrics, read_records, write_summary
+
+        write_summary(args.output, aggregate_metrics(read_records(args.records)))
         return 0
     raise AssertionError("unreachable")
 
