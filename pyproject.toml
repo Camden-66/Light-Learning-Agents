@@ -28,6 +28,9 @@ light-learning = "light_learning.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/light_learning"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"web" = "light_learning/web"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

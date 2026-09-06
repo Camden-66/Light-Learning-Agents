@@ -212,12 +212,10 @@ def test_demo_metrics_are_explicitly_non_reportable() -> None:
     assert "eval_mae" not in public
 
 
-def test_web_root_is_inside_the_installed_package() -> None:
-    expected = Path(web_server.__file__).resolve().parent / "web"
-    assert web_server.WEB_ROOT == expected
-    assert (expected / "index.html").is_file()
+def test_web_root_contains_the_explainer_assets() -> None:
+    assert (web_server.WEB_ROOT / "index.html").is_file()
     assert {"index.html", "app.js", "style.css"} <= {
-        path.name for path in expected.iterdir()
+        path.name for path in web_server.WEB_ROOT.iterdir()
     }
 
 

@@ -15,9 +15,16 @@ from .mle import PassiveUniformOracleMLE, likelihood_profile, run_mle_episode
 from .room import RoomEnv
 from .types import TerminalOutcome
 
-# Static assets live inside the Python package so an installed wheel can serve
-# the explainer without relying on a repository-relative path.
-WEB_ROOT = Path(__file__).resolve().with_name("web")
+# Built wheels include the repository's ``web`` directory at
+# ``light_learning/web``.  When running directly from a source checkout, fall
+# back to the repository copy so there is still only one source of truth.
+_PACKAGE_WEB_ROOT = Path(__file__).resolve().with_name("web")
+_REPOSITORY_WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
+WEB_ROOT = (
+    _PACKAGE_WEB_ROOT
+    if (_PACKAGE_WEB_ROOT / "index.html").is_file()
+    else _REPOSITORY_WEB_ROOT
+)
 _LOCK = threading.Lock()
 _SESSIONS: dict[str, dict] = {}
 _RL_BY_BUDGET: dict[int, dict] = {}
