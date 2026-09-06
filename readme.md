@@ -19,15 +19,26 @@ deliverable: [`docs/evaluator-build-spec.md`](docs/evaluator-build-spec.md).
 
 ## Interactive explainer (MLE + RL)
 
-Static files live **inside the package**: `src/light_learning/web/`. The server
-is `light_learning.web_server` (`POST /api/rl/train`, `/api/rl/play`,
-`/api/mle`). An old process on the same port that predates these routes returns
-`{"error": "unknown endpoint"}` immediately — that is not “still training”.
+Static files live **inside the package**: `src/light_learning/web/`. There is
+**no** `index.html` at the repository root. Opening the repo with
+`python -m http.server` (or Live Preview on the repo root) produces exactly
+this stdlib page:
+
+```
+Error response
+Error code: 404
+Message: File not found.
+```
+
+Use the packaged CLI instead. From a clone of this branch:
 
 ```bash
+git clone https://github.com/Camden-66/Light-Learning-Agents.git
+cd Light-Learning-Agents
+git checkout feat/baselines-and-explainer
 uv sync --extra dev --extra rl
 uv run pytest
-uv run light-learning web --port 8768
+uv run light-learning web
 ```
 
 Without `uv`:
@@ -36,8 +47,13 @@ Without `uv`:
 PYTHONPATH=src python -m light_learning.cli web --port 8768
 ```
 
-Open **http://127.0.0.1:8768/** (or whatever port you passed). Stop any stale
-server first if the port is already taken.
+Then open **http://127.0.0.1:8768/** (trailing slash is fine). The process
+prints the directory it is serving; it must contain `index.html`. Stop any
+stale listener on that port first (`lsof -i :8768`).
+
+The server is `light_learning.web_server` (`POST /api/rl/train`, `/api/rl/play`,
+`/api/mle`). An old process on the same port that predates these routes returns
+`{"error": "unknown endpoint"}` immediately — that is not “still training”.
 
 Sanity check that RL is mounted:
 

@@ -55,7 +55,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     preflight_parser.add_argument("--model", dest="models", action="append")
     web_parser = subparsers.add_parser("web", help="interactive RoomEnv explainer")
     web_parser.add_argument("--host", default="127.0.0.1")
-    web_parser.add_argument("--port", type=int, default=8767)
+    web_parser.add_argument("--port", type=int, default=8768)
     args = parser.parse_args(argv)
 
     if args.command == "preflight":

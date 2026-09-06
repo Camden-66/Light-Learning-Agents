@@ -185,9 +185,38 @@ def test_demo_metrics_are_explicitly_non_reportable() -> None:
 
 
 def test_web_root_is_inside_the_installed_package() -> None:
-    expected = Path(web_server.__file__).resolve().with_name("web")
+    expected = Path(web_server.__file__).resolve().parent / "web"
+    assert web_server.resolve_web_root() == expected
     assert web_server.WEB_ROOT == expected
-    assert web_server.WEB_ROOT.is_dir()
+    assert (expected / "index.html").is_file()
     assert {"index.html", "app.js", "style.css"} <= {
-        path.name for path in web_server.WEB_ROOT.iterdir()
+        path.name for path in expected.iterdir()
     }
+
+
+def test_http_root_serves_the_explainer() -> None:
+    import threading
+    from http.server import ThreadingHTTPServer
+    from urllib.request import urlopen
+
+    class ReuseServer(ThreadingHTTPServer):
+        allow_reuse_address = True
+
+    httpd = ReuseServer(("127.0.0.1", 0), web_server.Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = httpd.server_address[1]
+        with urlopen(f"http://127.0.0.1:{port}/", timeout=5) as response:
+            body = response.read()
+            assert response.status == 200
+            assert b"Light Learning Agents" in body
+        with urlopen(f"http://127.0.0.1:{port}/app.js", timeout=5) as response:
+            assert response.status == 200
+            assert b"budget" in response.read()
+        with urlopen(f"http://127.0.0.1:{port}/style.css", timeout=5) as response:
+            assert response.status == 200
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)

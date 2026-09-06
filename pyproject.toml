@@ -32,6 +32,7 @@ packages = ["src/light_learning"]
 "src/light_learning/web/index.html" = "light_learning/web/index.html"
 "src/light_learning/web/app.js" = "light_learning/web/app.js"
 "src/light_learning/web/style.css" = "light_learning/web/style.css"
+"src/light_learning/web/__init__.py" = "light_learning/web/__init__.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -17,7 +17,27 @@ from .types import TerminalOutcome
 
 # Static assets live inside the Python package so an installed wheel can serve
 # the explainer without relying on a repository-relative path.
-WEB_ROOT = Path(__file__).resolve().with_name("web")
+
+
+def resolve_web_root() -> Path:
+    """Return the directory that contains index.html, or fail with a setup hint."""
+    packaged = Path(__file__).resolve().parent / "web"
+    fallbacks = [
+        packaged,
+        Path.cwd() / "src" / "light_learning" / "web",
+    ]
+    for candidate in fallbacks:
+        if (candidate / "index.html").is_file():
+            return candidate
+    searched = ", ".join(str(path) for path in fallbacks)
+    raise FileNotFoundError(
+        "Explainer files were not found (need index.html). "
+        f"Looked in: {searched}. "
+        "From this repo run: uv sync --extra dev && uv run light-learning web"
+    )
+
+
+WEB_ROOT = resolve_web_root()
 _LOCK = threading.Lock()
 _SESSIONS: dict[str, dict] = {}
 _RL: dict | None = None
@@ -79,8 +99,12 @@ def _public(session: dict, extra: dict | None = None) -> dict:
 
 
 class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
+    def __init__(self, *args, directory=None, **kwargs):
+        super().__init__(
+            *args,
+            directory=str(directory or resolve_web_root()),
+            **kwargs,
+        )
 
     def log_message(self, fmt: str, *args) -> None:
         print("[web]", fmt % args)
@@ -115,6 +139,8 @@ class Handler(SimpleHTTPRequestHandler):
                 payload = _rl_public()
             self._json(200, payload)
             return
+        if path in ("", "/"):
+            self.path = "/index.html"
         super().do_GET()
 
     def do_POST(self) -> None:
@@ -374,15 +400,18 @@ def _demo_mle_metrics() -> dict:
     }
 
 
-def serve(host: str = "127.0.0.1", port: int = 8767) -> None:
-    if not WEB_ROOT.is_dir():
+def serve(host: str = "127.0.0.1", port: int = 8768) -> None:
+    root = resolve_web_root()
+    if not (root / "index.html").is_file():
         raise FileNotFoundError(
-            f"packaged web assets not found at {WEB_ROOT}; reinstall the package"
+            f"packaged web assets not found at {root}; expected index.html"
         )
 
     class ReuseServer(ThreadingHTTPServer):
         allow_reuse_address = True
 
     httpd = ReuseServer((host, port), Handler)
-    print(f"Light Learning demo  http://{host}:{port}")
+    print(f"Light Learning demo  http://{host}:{port}/", flush=True)
+    print(f"Serving files from  {root}", flush=True)
+    print("Do not use `python -m http.server` from the repo root; that 404s.", flush=True)
     httpd.serve_forever()
