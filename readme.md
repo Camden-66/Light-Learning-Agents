@@ -111,5 +111,16 @@ owns pilot/full execution and run-directory output.
 
 The primary LLM prompt gives only qualitative room rules, so it measures
 zero-shot in-context model discovery rather than online weight learning. The
-disclosed-likelihood condition is an ablation. The oracle MLE and trained RL
-baselines have different information regimes; report their labels faithfully.
+disclosed-likelihood condition is an ablation over exactly one variable: both
+arms state the answer range, and only the disclosed arm supplies the Bernoulli
+likelihood.
+
+The oracle MLE and trained RL baselines have different information regimes;
+report their labels faithfully. In particular the three are not a ladder. Oracle
+MLE has the exact likelihood but zero task exposure and a deliberately
+non-adaptive uniform query schedule; PPO has large task exposure and an adaptive
+policy but no analytic knowledge of the likelihood. Oracle MLE is therefore not
+a performance ceiling: an adaptive querier using the same exact likelihood
+reaches MAE 2.54/1.23/0.55/0.30 at budgets 4/8/16/32 against passive uniform
+MLE's 3.62/2.33/1.24/0.59, so roughly a third to a half of the oracle MLE's
+error is query strategy rather than model knowledge.

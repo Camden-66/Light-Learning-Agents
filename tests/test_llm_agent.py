@@ -91,3 +91,79 @@ def test_run_metadata_caches_model_digest() -> None:
     second = agent.run_metadata()
     assert first is second
     assert first["backend"]["digest"] == "test-digest"
+
+
+def _system_prompt(condition: str) -> str:
+    agent = LLMRoomAgent(
+        FakeChatClient([]), LLMRoomAgentConfig(model="qwen3:1.7b", condition=condition)
+    )
+    return agent._system_prompt()
+
+
+def test_both_conditions_state_the_answer_range() -> None:
+    """Withholding the support would confound discovery with guessing outside it."""
+
+    for condition in ("qualitative", "disclosed"):
+        prompt = _system_prompt(condition)
+        assert "from 4 through 27" in prompt
+        assert "from 0 through 31" in prompt
+
+
+def test_conditions_differ_only_by_the_disclosed_likelihood() -> None:
+    """The ablation must vary exactly one thing: the likelihood."""
+
+    import os
+
+    qualitative = _system_prompt("qualitative")
+    disclosed = _system_prompt("disclosed")
+    shared = os.path.commonprefix([qualitative, disclosed])
+
+    # Everything up to the condition-specific sentence is byte-identical.
+    assert "from 4 through 27" in shared
+    assert "full observation budget" in shared
+    assert qualitative[len(shared):].startswith("The room has a stable but unknown")
+    assert disclosed[len(shared):].startswith("Writing theta")
+
+
+def test_qualitative_prompt_withholds_the_likelihood() -> None:
+    prompt = _system_prompt("qualitative")
+    assert "exp(" not in prompt
+    assert "P(on" not in prompt
+    for constant in ("0.05", "0.9", "18"):
+        assert constant not in prompt
+    assert "No probability formula is supplied." in prompt
+
+
+def test_disclosed_prompt_tracks_the_room_configuration() -> None:
+    """The formula is rendered from RoomConfig, not hardcoded."""
+
+    from light_learning.config import RoomConfig
+
+    room = RoomConfig(background_probability=0.1, peak_amplitude=0.5)
+    agent = LLMRoomAgent(
+        FakeChatClient([]),
+        LLMRoomAgentConfig(model="qwen3:1.7b", condition="disclosed"),
+        room,
+    )
+    assert "0.1 + 0.5 * exp(-(t - theta)^2 / 18)" in agent._system_prompt()
+
+
+def test_run_metadata_pins_the_exact_prompt() -> None:
+    """A manifest must show which prompt wording produced a run."""
+
+    import hashlib
+
+    agent = LLMRoomAgent(
+        FakeChatClient([]), LLMRoomAgentConfig(model="qwen3:1.7b", condition="qualitative")
+    )
+    metadata = agent.run_metadata()
+    prompt = metadata["system_prompt"]
+    assert "from 4 through 27" in prompt
+    assert metadata["system_prompt_sha256"] == hashlib.sha256(
+        prompt.encode("utf-8")
+    ).hexdigest()
+
+    disclosed = LLMRoomAgent(
+        FakeChatClient([]), LLMRoomAgentConfig(model="qwen3:1.7b", condition="disclosed")
+    ).run_metadata()
+    assert disclosed["system_prompt_sha256"] != metadata["system_prompt_sha256"]
