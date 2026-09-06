@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "master_seed": 20260906,
+  "budgets": [4, 8, 16, 32],
+  "profiles": {
+    "pilot": {
+      "version": "room-v1-pilot-v2",
+      "episodes_per_budget": 10,
+      "status": "preliminary"
+    },
+    "full": {
+      "version": "room-v1-full-v1",
+      "episodes_per_budget": 100,
+      "status": "reportable"
+    }
+  }
+}
