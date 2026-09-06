@@ -15,6 +15,7 @@ from .evaluator import (
 from .gym_env import GymRoomEnv
 from .llm_agent import LLMRoomAgent, LLMRoomAgentConfig
 from .ollama import ChatResponse, OllamaChatClient, OllamaError
+from .emergent import EmergentBumpAgent
 from .mle import PassiveUniformOracleMLE
 from .ppo import PPORoomAgent, train_ppo, train_ppo_suite
 from .room import RoomEnv, fallback_estimate, fallback_observation_slot
@@ -34,6 +35,7 @@ __all__ = [
     "AgentDecision",
     "EpisodeDefinition",
     "EpisodeRecord",
+    "EmergentBumpAgent",
     "GymRoomEnv",
     "LLMRoomAgent",
     "LLMRoomAgentConfig",

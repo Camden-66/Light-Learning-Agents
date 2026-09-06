@@ -4,6 +4,8 @@ const state = {
   mle: null,
   rlPlay: null,
   rlTrain: null,
+  emergent: null,
+  emergentPool: null,
 };
 
 const room = document.getElementById("room");
@@ -36,7 +38,7 @@ function paintWindows() {
   const mle = state.mle;
   [...room.children].forEach((el, t) => {
     el.disabled = !play || play.done;
-    el.classList.remove("on", "off", "true", "you", "mle", "rl");
+    el.classList.remove("on", "off", "true", "you", "mle", "rl", "emergent");
     if (!play) return;
     const visits = play.visit_counts[t];
     const ons = play.on_counts[t];
@@ -45,6 +47,7 @@ function paintWindows() {
     if (play.theta_hat === t) el.classList.add("you");
     if (mle && mle.theta_hat === t) el.classList.add("mle");
     if (state.rlPlay && state.rlPlay.theta_hat === t) el.classList.add("rl");
+    if (state.emergent && state.emergent.theta_hat === t) el.classList.add("emergent");
   });
 }
 
@@ -52,6 +55,7 @@ function paintComparisonControls() {
   const available = Boolean(state.play && state.play.done);
   document.getElementById("run-mle").disabled = !available;
   document.getElementById("run-rl").disabled = !available;
+  document.getElementById("run-emergent").disabled = !available;
 }
 
 function setStatus(text) {
@@ -80,6 +84,8 @@ function renderMeters() {
     state.mle ? String(state.mle.absolute_error) : "not run";
   document.getElementById("rl-err").textContent =
     state.rlPlay ? String(state.rlPlay.absolute_error) : "not run";
+  document.getElementById("emergent-err").textContent =
+    state.emergent ? String(state.emergent.absolute_error) : "not run";
 }
 
 function drawCurve(canvas, values, marks) {
@@ -110,6 +116,20 @@ function drawCurve(canvas, values, marks) {
     else ctx.lineTo(X, Y);
   });
   ctx.stroke();
+  if (marks && marks.inferred) {
+    ctx.strokeStyle = "#c084fc";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    marks.inferred.forEach((v, i) => {
+      const X = x(i);
+      const Y = y(v);
+      if (i === 0) ctx.moveTo(X, Y);
+      else ctx.lineTo(X, Y);
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
   if (marks) {
     if (marks.theta != null) {
       ctx.strokeStyle = "#c45c26";
@@ -139,6 +159,13 @@ function drawCurve(canvas, values, marks) {
       ctx.beginPath();
       ctx.moveTo(x(marks.rl), 12);
       ctx.lineTo(x(marks.rl), h - 28);
+      ctx.stroke();
+    }
+    if (marks.emergent != null) {
+      ctx.strokeStyle = "#c084fc";
+      ctx.beginPath();
+      ctx.moveTo(x(marks.emergent), 12);
+      ctx.lineTo(x(marks.emergent), h - 28);
       ctx.stroke();
     }
   }
@@ -195,11 +222,13 @@ function paintObs(obs) {
 function refreshCharts() {
   const p = state.play || {};
   const m = state.mle || {};
-  drawCurve(document.getElementById("curve"), p.curve || m.curve, {
-    theta: p.theta ?? m.theta,
+  drawCurve(document.getElementById("curve"), p.curve || m.curve || (state.emergent && state.emergent.curve), {
+    theta: p.theta ?? m.theta ?? (state.emergent && state.emergent.theta),
     you: p.theta_hat,
     mle: m.theta_hat,
     rl: state.rlPlay ? state.rlPlay.theta_hat : null,
+    emergent: state.emergent ? state.emergent.theta_hat : null,
+    inferred: state.emergent ? state.emergent.inferred_curve : null,
   });
   drawLL(document.getElementById("ll"), m.likelihood);
 }
@@ -208,16 +237,18 @@ async function newEpisode() {
   const budget = Number(document.getElementById("budget").value);
   state.mle = null;
   state.rlPlay = null;
+  state.emergent = null;
   logEl.innerHTML = "";
   state.play = await api("/api/new", { budget });
   state.session = state.play.session;
-  setStatus(`Episode ${state.play.episode_id}. Click windows to look. θ is still hidden.`);
-  addLog(`Start. Budget ${budget}.`);
+  setStatus(`Episode ${state.play.episode_id.slice(0, 8)}… Look, then commit. Compare MLE / RL / emergent on this peak after that.`);
+  addLog(`Start. Budget ${budget}. Same frozen RL policy will be reused; emergent runs on this episode.`);
   paintWindows();
   paintComparisonControls();
   renderMeters();
   paintObs(state.play.obs);
   refreshCharts();
+  ensureRl(budget);
 }
 
 async function onSlot(t) {
@@ -244,7 +275,7 @@ async function onSlot(t) {
     }
     state.play = res;
     addLog(`You guessed θ̂=${t}. True θ=${res.theta}, error ${res.absolute_error}.`);
-    setStatus(`Revealed: peak at ${res.theta}. Orange = truth, dashed = you, green = MLE if run.`);
+    setStatus(`True peak ${res.theta}. Now compare oracle MLE, the frozen RL policy, and the emergent model on this episode.`);
   }
   paintWindows();
   paintComparisonControls();
@@ -323,23 +354,38 @@ function renderRlTrain(data) {
   document.getElementById("rl-n").textContent = String(data.n_episodes);
   document.getElementById("rl-mae").textContent = data.demo_mae.toFixed(2);
   document.getElementById("rl-hit").textContent = `${(data.demo_hit_within_one * 100).toFixed(0)}%`;
-  status.textContent = `REINFORCE demo on budget ${data.budget}. Smoke-sample MAE ${data.demo_mae.toFixed(2)}. ${data.note}`;
+  const seedNote = data.train_seed == null ? "" : ` train seed ${data.train_seed}.`;
+  status.textContent = `Frozen REINFORCE for B=${data.budget}.${seedNote} Smoke MAE ${data.demo_mae.toFixed(2)} on other rooms. Compare applies this policy to the current episode.`;
   drawRl(document.getElementById("rl-chart"), data.history);
+}
+
+async function ensureRl(budget, { retrain = false, seed = 0 } = {}) {
+  if (!retrain) {
+    const existing = await api(`/api/rl?budget=${budget}`);
+    if (existing.trained) {
+      renderRlTrain(existing);
+      return existing;
+    }
+  }
+  document.getElementById("rl-status").textContent = retrain
+    ? `Retraining REINFORCE with seed ${seed} (other rooms, not this episode)…`
+    : `Preparing a REINFORCE policy for B=${budget} on other rooms…`;
+  const data = await api("/api/rl/train", { budget, episodes: 250, seed });
+  if (data.error) {
+    document.getElementById("rl-status").textContent = data.error;
+    return data;
+  }
+  renderRlTrain(data);
+  addLog(`REINFORCE policy for B=${budget} ready (seed ${data.train_seed}). Reused until you retrain.`);
+  return data;
 }
 
 async function trainRl() {
   const btn = document.getElementById("train-rl");
   const budget = Number(document.getElementById("budget").value);
   btn.disabled = true;
-  document.getElementById("rl-status").textContent = "Training the REINFORCE demo… a few seconds.";
   try {
-    const data = await api("/api/rl/train", { budget, episodes: 250, seed: 0 });
-    if (data.error) {
-      document.getElementById("rl-status").textContent = data.error;
-      return;
-    }
-    renderRlTrain(data);
-    addLog(`REINFORCE demo trained ${data.n_episodes} episodes. Smoke-sample MAE ${data.demo_mae.toFixed(2)}.`);
+    await ensureRl(budget, { retrain: true, seed: Math.floor(Math.random() * 1e9) });
   } finally {
     btn.disabled = false;
   }
@@ -354,6 +400,8 @@ async function runRl() {
     setStatus("Commit your estimate before revealing comparison results.");
     return;
   }
+  const budget = Number(document.getElementById("budget").value);
+  await ensureRl(budget);
   const res = await api("/api/rl/play", { session: state.session });
   if (res.error) {
     setStatus(res.error);
@@ -361,10 +409,105 @@ async function runRl() {
     return;
   }
   state.rlPlay = res;
-  addLog(`REINFORCE demo guessed ${res.theta_hat}, error ${res.absolute_error}.`);
-  setStatus("Blue outline is the trained REINFORCE demo estimate on this episode.");
+  addLog(`Frozen REINFORCE guessed ${res.theta_hat}, error ${res.absolute_error} on this episode.`);
+  setStatus("Blue = frozen RL policy on this episode. Violet = emergent. Green = oracle MLE.");
   paintWindows();
   renderMeters();
+  refreshCharts();
+}
+
+function pct(x) {
+  return `${(Number(x) * 100).toFixed(0)}%`;
+}
+
+// One source per meter. Showing the pooled prior and the in-episode posterior
+// under the same label at the same time made two different numbers look like a
+// contradiction.
+function renderEmergentMeters() {
+  const e = state.emergent;
+  const pool = state.emergentPool;
+  const src = e || (pool && pool.pooled ? pool : null);
+  const scope = e ? "this episode" : pool && pool.pooled ? "pooled prior" : "—";
+  document.getElementById("em-n").textContent = pool && pool.pooled ? String(pool.n_episodes) : "—";
+  document.getElementById("em-scope").textContent = scope;
+  if (src) {
+    const sigma = e ? Number(e.sigma) : Number(src.mean_sigma);
+    document.getElementById("em-sigma").textContent = Number.isFinite(sigma) ? sigma.toFixed(1) : "—";
+    document.getElementById("em-mass").textContent =
+      `${pct(src.sigma_mass_near_3)} vs ${pct(src.sigma_mass_chance)} chance`;
+    document.getElementById("em-ab").textContent = e
+      ? `${Number(e.background).toFixed(2)}, ${Number(e.amplitude).toFixed(2)}`
+      : "—";
+  } else {
+    document.getElementById("em-sigma").textContent = "—";
+    document.getElementById("em-mass").textContent = "—";
+    document.getElementById("em-ab").textContent = "—";
+  }
+}
+
+function renderEmergentPool(data) {
+  state.emergentPool = data;
+  const status = document.getElementById("emergent-status");
+  if (!data || !data.pooled) {
+    status.textContent = "No pooled shape yet. Compare still works in-episode only.";
+    renderEmergentMeters();
+    return;
+  }
+  status.textContent =
+    `Pooled ${data.n_episodes} rooms at budget ${data.budget}. ` +
+    `Mass within one grid step of σ=3 is ${pct(data.sigma_mass_near_3)} against ` +
+    `${pct(data.sigma_mass_chance)} for a posterior that learned nothing ` +
+    `(posterior mean σ ${Number(data.mean_sigma).toFixed(2)}, true 3). ${data.note}`;
+  renderEmergentMeters();
+}
+
+async function poolEmergent() {
+  const btn = document.getElementById("pool-emergent");
+  const budget = Number(document.getElementById("budget").value);
+  btn.disabled = true;
+  const POOL_ROOMS = 32;
+  document.getElementById("emergent-status").textContent =
+    `Pooling lamp shape from ${POOL_ROOMS} training rooms… this runs ${POOL_ROOMS} full episodes, around 15 seconds.`;
+  try {
+    const data = await api("/api/emergent/pool", { budget, episodes: POOL_ROOMS, seed: 0 });
+    if (data.error) {
+      document.getElementById("emergent-status").textContent = data.error;
+      return;
+    }
+    renderEmergentPool(data);
+    addLog(
+      `Pooled emergent shape on ${data.n_episodes} rooms. Mass near σ=3: ` +
+      `${pct(data.sigma_mass_near_3)} (chance ${pct(data.sigma_mass_chance)}).`
+    );
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function runEmergent() {
+  if (!state.session) {
+    setStatus("Start an episode first.");
+    return;
+  }
+  if (!state.play || !state.play.done) {
+    setStatus("Commit your estimate before revealing comparison results.");
+    return;
+  }
+  const res = await api("/api/emergent/play", { session: state.session });
+  if (res.error) {
+    setStatus(res.error);
+    return;
+  }
+  state.emergent = res;
+  addLog(
+    `Emergent (${res.condition}) guessed ${res.theta_hat}, error ${res.absolute_error}, ` +
+    `σ=${Number(res.sigma).toFixed(1)}, mass near σ=3 ${pct(res.sigma_mass_near_3)} ` +
+    `(chance ${pct(res.sigma_mass_chance)}).`
+  );
+  setStatus("Violet = emergent peak and dashed inferred P(on|t). It did not receive the canonical formula.");
+  paintWindows();
+  renderMeters();
+  renderEmergentMeters();
   refreshCharts();
 }
 
@@ -385,8 +528,11 @@ async function loadMetrics() {
 }
 
 document.getElementById("new").addEventListener("click", newEpisode);
+document.getElementById("budget").addEventListener("change", newEpisode);
 document.getElementById("run-mle").addEventListener("click", runMle);
 document.getElementById("run-rl").addEventListener("click", runRl);
+document.getElementById("run-emergent").addEventListener("click", runEmergent);
+document.getElementById("pool-emergent").addEventListener("click", poolEmergent);
 document.getElementById("train-rl").addEventListener("click", trainRl);
 buildRoom();
 paintComparisonControls();
@@ -394,5 +540,5 @@ drawCurve(document.getElementById("curve"), null);
 drawLL(document.getElementById("ll"), null);
 drawRl(document.getElementById("rl-chart"), null);
 loadMetrics();
-api("/api/rl").then(renderRlTrain);
+api("/api/emergent").then(renderEmergentPool);
 newEpisode();

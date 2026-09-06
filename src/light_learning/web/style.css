@@ -57,12 +57,14 @@ button:hover { border-color: var(--gold); color: var(--gold); }
 .status { margin: 0; flex: 1 1 16rem; color: #cfc6b4; font-size: 0.95rem; }
 .meters {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 0.75rem;
   margin-bottom: 1rem;
 }
 .window.rl { outline: 2px solid #6ea8d4; outline-offset: 3px; }
+.window.emergent { outline: 2px solid #c084fc; outline-offset: -8px; }
 #rl-meters { grid-template-columns: repeat(3, 1fr); }
+#emergent-meters { grid-template-columns: repeat(5, 1fr); }
 .meters div { border: 1px solid var(--line); padding: 0.6rem 0.75rem; }
 .meters span { display: block; color: var(--muted); font-size: 0.72rem; letter-spacing: 0.04em; }
 .meters strong { font-size: 1.15rem; font-weight: 500; }
@@ -122,7 +124,7 @@ canvas { width: 100%; height: auto; background: #0e0c0a; border: 1px solid var(-
 .card b { display: block; font-size: 1.6rem; font-weight: 500; color: var(--gold); }
 footer { color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--line); }
 @media (max-width: 800px) {
-  .rules, .meters, .results .cards { grid-template-columns: 1fr 1fr; }
+  .rules, .meters, .results .cards, #emergent-meters { grid-template-columns: 1fr 1fr; }
   #rl-meters { grid-template-columns: 1fr 1fr; }
   .room { min-height: 90px; }
   .window { height: 72px; }

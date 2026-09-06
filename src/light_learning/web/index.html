@@ -12,8 +12,9 @@
     <h1>You are outside a room.<br />Peek a few times, then bet when the light is most likely on.</h1>
     <p class="lede">
       This page talks to the canonical <strong>RoomEnv</strong> in the repo — 32 time slots, a hidden peak,
-      binary on/off draws. Play as the agent, then run <strong>oracle MLE</strong> on the same episode,
-      and compare with a small <strong>REINFORCE demonstration</strong>.
+      binary on/off draws. Play as the agent, then compare <strong>oracle MLE</strong>, a small
+      <strong>REINFORCE</strong> demo, and an <strong>emergent bump world-model</strong> that infers the
+      lamp pattern without the formula.
     </p>
   </header>
 
@@ -35,6 +36,10 @@
       not the curve itself.</p>
       <p>The quick interactive trainer below is <strong>REINFORCE, not PPO</strong>. Its smoke-sample numbers are
       illustrative and must not be reported as official benchmark results.</p>
+      <p><strong>Emergent world-model</strong> also never sees the formula. It assumes some unimodal bump
+      <code>a + b·exp(−(t−μ)² / (2σ²))</code> and infers (μ, σ, a, b) from on/off bits. Optional pooling
+      uses revealed peaks from other rooms to learn the lamp <em>shape</em>, then infers a new peak here.
+      True width is σ=3; posterior mass on 3 is the “did it learn the pattern?” check.</p>
     </article>
   </section>
 
@@ -52,7 +57,8 @@
       <button type="button" id="new">New episode</button>
       <button type="button" id="run-mle" disabled>Compare oracle MLE</button>
       <button type="button" id="run-rl" disabled>Compare REINFORCE demo</button>
-      <p class="status" id="status">Click New episode, then click windows to look. After the budget, click once to commit.</p>
+      <button type="button" id="run-emergent" disabled>Compare emergent model</button>
+      <p class="status" id="status">A new episode is ready. Look, commit, then compare MLE / RL / emergent on this same hidden peak.</p>
     </div>
 
     <div class="meters">
@@ -61,6 +67,7 @@
       <div><span>Your error</span><strong id="you-err">not committed</strong></div>
       <div><span>MLE error</span><strong id="mle-err">not run</strong></div>
       <div><span>REINFORCE demo error</span><strong id="rl-err">not run</strong></div>
+      <div><span>Emergent error</span><strong id="emergent-err">not run</strong></div>
     </div>
 
     <p class="caption">32 windows = 32 slots. Yellow = ON, cool gray = OFF, empty = unvisited.</p>
@@ -69,7 +76,7 @@
 
     <div class="charts">
       <figure>
-        <figcaption>True P(on | t) — revealed only after you commit</figcaption>
+        <figcaption>True P(on | t) vs inferred bump — gold = truth, violet = emergent model</figcaption>
         <canvas id="curve" width="960" height="220"></canvas>
       </figure>
       <figure>
@@ -81,15 +88,16 @@
   </section>
 
   <section class="ppo">
-    <h2>RL training (REINFORCE on GymRoomEnv)</h2>
+    <h2>RL policy (REINFORCE, reused across episodes)</h2>
     <p class="caption">
-      Same public observation and terminal reward as PPO: look steps give 0, commit gives −|θ − θ̂| / 31.
-      This demo trains a linear softmax policy for a few hundred episodes so you can watch MAE fall.
-      Stable-Baselines3 PPO lives in <code>light_learning.ppo</code> for longer runs.
+      Training does <em>not</em> use the episode you are playing. A linear softmax policy is trained
+      once per budget on <em>other</em> random rooms, then frozen. New episode only changes the hidden
+      peak; Compare RL applies that same frozen policy here. Clicking Train with seed 0 always
+      reproduces the same curve — use Retrain for a new seed. Official PPO is <code>light_learning.ppo</code>.
     </p>
     <div class="stage-bar">
-      <button type="button" id="train-rl">Train REINFORCE demo (250 episodes)</button>
-      <p class="status" id="rl-status">Not trained yet. Training uses random peaks, not the episode you are playing.</p>
+      <button type="button" id="train-rl">Retrain REINFORCE (new seed)</button>
+      <p class="status" id="rl-status">A policy for this budget is prepared in the background. You do not train again for each episode.</p>
     </div>
     <div class="meters" id="rl-meters">
       <div><span>Train episodes</span><strong id="rl-n">—</strong></div>
@@ -108,6 +116,27 @@
     <div class="obs-strip" id="obs-strip" hidden>
       <p>Current Gym observation (the same public vector RL consumes)</p>
       <div class="obs-rows"></div>
+    </div>
+  </section>
+
+  <section class="ppo emergent-panel">
+    <h2>Emergent lamp model (no formula)</h2>
+    <p class="caption">
+      Four steps: (1) assume only “the light has some bump in time”; (2) pick the next look that most
+      shrinks uncertainty over (μ, σ, a, b); (3) after you commit, optionally pool revealed peaks from
+      other rooms to learn the lamp’s width and height; (4) on this room, output a peak and an implied
+      P(on|t). The model never receives 0.05, 0.90, or 18. True σ is 3, so the width check reports posterior mass within one grid step of 3 next to the mass an unlearned posterior already puts there.
+    </p>
+    <div class="stage-bar">
+      <button type="button" id="pool-emergent">Pool lamp shape (32 training rooms)</button>
+      <p class="status" id="emergent-status">No pooled shape yet. Compare still works in-episode only.</p>
+    </div>
+    <div class="meters" id="emergent-meters">
+      <div><span>Pooled rooms</span><strong id="em-n">—</strong></div>
+      <div><span>MAP σ</span><strong id="em-sigma">—</strong></div>
+      <div><span>Mass near σ=3 vs chance</span><strong id="em-mass">—</strong></div>
+      <div><span>Reading</span><strong id="em-scope">—</strong></div>
+      <div><span>Inferred a, b</span><strong id="em-ab">—</strong></div>
     </div>
   </section>
 
