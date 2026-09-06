@@ -65,6 +65,109 @@ samples, not the PPO table.
 RL can get good at the task without ever representing `P(on | t)`. That is
 the contrast the thesis needs.
 
+**The shipped default does not reach that regime.** Measured on 100 held-out
+episodes per budget, three seeds each:
+
+| `total_timesteps` | budget 8 | budget 32 |
+|---:|---:|---:|
+| 20,000 (current default) | 5.77 | 5.91 |
+| 100,000 | 5.91 | 5.78 |
+| 500,000 | 4.68 | 3.65 |
+| 1,000,000 | 3.94 | 3.37 |
+| *best constant answer* | *5.90* | *5.90* |
+| *oracle MLE* | *1.49* | *0.60* |
+
+At the default, PPO is a constant predictor: one checkpoint used 3 of 32 look
+slots and 2 of 32 estimates, and scores land on the best-constant-answer value
+to two decimals — identical at budget 8 and budget 32, so it is ignoring the
+extra 24 looks entirely. Learning only switches on around 500k steps, and even
+at 1M it trails oracle MLE by 2.6x and 5.6x. Seed variance is bimodal, not
+Gaussian — at 500k, budget 8 gives `4.22, 3.91, 5.90`, where the third seed is
+still fully collapsed — so a mean across seeds describes neither outcome.
+
+The likely cause is the reward shape: every look returns 0 and the only signal
+is the terminal `-|θ − θ̂| / 31`, across a 32-way action space at every step.
+Raise `total_timesteps` and report per training seed before treating any PPO row
+as an RL result rather than a measurement of the prior median.
+
+## What the local LLM agent does
+
+`LLMRoomAgent` asks a local Ollama model to play the room directly. The
+baselines are reference points; this is the condition the thesis is about.
+
+**It never trains.** The weights are fixed. Every episode starts from nothing,
+and the only evidence the model ever gets is the at most `B` on/off bits in the
+current context. So it measures **in-context inference**, not weight learning:
+can a model that has never seen this room work out where the peak is from a
+handful of bits?
+
+### One turn
+
+Each turn is a **fresh chat request**. No conversation accumulates:
+
+1. a system prompt fixing the task and the condition;
+2. one JSON user message — `observation_history`, `remaining_observations`,
+   `valid_time_slots`, and the exact action shape required right now;
+3. a JSON schema in Ollama's `format`, different per phase:
+   `{"kind":"observe","time_slot":N}` while looking,
+   `{"kind":"estimate","theta_hat":N}` on the commit turn.
+
+Native thinking is on and is captured in `AgentDecision.thinking` for the
+trace — but it is **never** fed back into a later prompt, so it cannot become
+hidden cross-turn or cross-episode memory. The history the model sees is only
+the slots it chose and the bits they returned.
+
+### The two conditions
+
+Both state the answer range (θ in `{4, …, 27}`) and the inspectable range
+(`0, …, 31`). They differ by exactly one sentence:
+
+| condition | what it adds | what it measures |
+|---|---|---|
+| `qualitative` | "a stable but unknown relationship … no probability formula is supplied" | zero-shot in-context model discovery |
+| `disclosed` | the Bernoulli likelihood `0.05 + 0.90 · exp(-(t − θ)² / 18)` | ablation: how much of the gap is *not knowing the formula* |
+
+Holding the answer range constant is load-bearing. Disclosing it in only one
+arm would blend "did not infer the structure" with "guessed outside the
+support", and the second is an answer-space handicap rather than a discovery
+failure.
+
+### When the model misbehaves
+
+A reply that is not valid JSON, not schema-conformant, or not an integer slot
+gets up to `schema_retries` (default 2) repair attempts. If it still fails, or
+the server is unreachable, the agent returns the evaluator's documented
+public-history fallback and marks both `fallback_used` and `protocol_failure`.
+Those episodes stay in the reported metrics: schema compliance is a property of
+the model under test, not a reason to drop data.
+
+### Reproducibility
+
+`run_metadata()` pins the model tag, `temperature` / `top_p` / `num_ctx` /
+`num_predict` / `seed`, the thinking flag, the retry count, the installed Ollama
+model digest, and the **exact `system_prompt` plus its SHA-256**. The prompt is
+the experiment's main variable, so a manifest that cannot identify the wording
+cannot be compared across runs.
+
+### Running it
+
+```bash
+uv run light-learning preflight     # disk, server, models; never auto-pulls
+```
+
+Defaults are `qwen3:1.7b` and `qwen3:4b`, and it wants 10 GiB free. Install the
+models yourself, then hand the constructed agent to `run_evaluation`.
+
+### Reading the result
+
+An LLM is not a blank slate — pretraining is an enormous amount of exposure.
+But it is exposure to *text*, not to this room: the model has never seen an
+episode of this task and carries nothing between episodes. Its prior that
+"lights probably peak somewhere and fade off" is precisely what the qualitative
+condition tests. A strong qualitative score is evidence the model applied a
+general structural prior to new evidence in context — not that it learned the
+room.
+
 ## What the emergent model is building
 
 `EmergentBumpAgent` is a **world model of the lamp**, not a policy and not a
@@ -226,17 +329,26 @@ disclosed-likelihood condition is an ablation over exactly one variable: both
 arms state the answer range, and only the disclosed arm supplies the Bernoulli
 likelihood.
 
-The baselines have different information regimes; report their labels
-faithfully. **The conditions are not a ladder.** Oracle MLE has the exact
-likelihood but zero task exposure and a deliberately non-adaptive uniform query
-schedule; PPO has large task exposure and an adaptive policy but no analytic
-knowledge of the likelihood; the emergent world-model has neither the formula
-nor task exposure, but does choose each look by information gain.
+The conditions have different information regimes; report their labels
+faithfully. **They are not a ladder.** Oracle MLE has the exact likelihood but
+zero task exposure and a deliberately non-adaptive uniform query schedule; PPO
+has task exposure and an adaptive policy but no analytic knowledge of the
+likelihood — though at the default training budget it converts none of that
+exposure into skill, see above; the LLM has vast pretraining but zero exposure
+to this room; the emergent world-model has neither the formula nor task
+exposure, but does choose each look by information gain.
 
-Oracle MLE is therefore **not a performance ceiling**. An adaptive querier
-using the same exact likelihood reaches MAE 2.54/1.23/0.55/0.30 at budgets
-4/8/16/32 against passive uniform MLE's 3.62/2.33/1.24/0.59, so roughly a third
-to a half of the oracle MLE's error is query strategy rather than model
+Oracle MLE is therefore **not a performance ceiling**. An adaptive querier using
+the *same* exact likelihood beats it at every budget (n = 2000, ±95% CI):
+
+| budget | passive uniform oracle MLE | adaptive oracle | share of MLE error that is query strategy |
+|---:|---:|---:|---:|
+| 4  | 3.74 ± 0.21 | 2.60 ± 0.18 | 31% |
+| 8  | 2.19 ± 0.15 | 1.15 ± 0.08 | 48% |
+| 16 | 1.21 ± 0.08 | 0.61 ± 0.04 | 49% |
+| 32 | 0.70 ± 0.04 | 0.31 ± 0.02 | 56% |
+
+A third to a half of oracle MLE's error is query strategy rather than model
 knowledge. An adaptive agent scoring below oracle MLE has not out-known it; it
 has out-queried it. Read any table that ranks them with that in mind.
 
