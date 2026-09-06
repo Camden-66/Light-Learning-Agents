@@ -70,7 +70,7 @@ episodes per budget, three seeds each:
 
 | `total_timesteps` | budget 8 | budget 32 |
 |---:|---:|---:|
-| 20,000 (current default) | 5.77 | 5.91 |
+| 20,000 | 5.77 | 5.91 |
 | 100,000 | 5.91 | 5.78 |
 | 500,000 | 4.68 | 3.65 |
 | 1,000,000 | 3.94 | 3.37 |
@@ -87,8 +87,11 @@ still fully collapsed — so a mean across seeds describes neither outcome.
 
 The likely cause is the reward shape: every look returns 0 and the only signal
 is the terminal `-|θ − θ̂| / 31`, across a 32-way action space at every step.
-Raise `total_timesteps` and report per training seed before treating any PPO row
-as an RL result rather than a measurement of the prior median.
+Report per training seed before treating any PPO row as an RL result rather
+than a measurement of the prior median. The `total_timesteps` default has since
+been raised from 20,000 to 1,000,000, and the evaluator now reports
+`skill_over_constant` and `degenerate_policy` per cell so a collapsed policy
+cannot pass as a real one.
 
 ## What the local LLM agent does
 
