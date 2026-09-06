@@ -15,16 +15,59 @@ then estimate the hidden time slot where it is most likely to be on.
 The evaluator (held-out banks, JSONL artifacts) is still a separate teammate
 deliverable: [`docs/evaluator-build-spec.md`](docs/evaluator-build-spec.md).
 
-## Interactive explainer
+## Interactive explainer (MLE + RL)
+
+The local page is an English UI over the canonical `RoomEnv` / `GymRoomEnv`.
+**Train RL only works if this process is the current `web_server.py`** (the
+one that serves `POST /api/rl/train`). An old server on the same port returns
+`{"error": "unknown endpoint"}` immediately — that is not “still training”.
+
+From this branch (`feat/baselines-and-explainer`):
 
 ```bash
 uv sync --extra dev
-uv run light-learning web --port 8767
+uv run pytest
+uv run light-learning web --port 8768
 ```
 
-Open http://127.0.0.1:8767/ — it drives the same `RoomEnv` as the rest of the
-package. **Train RL** runs on-policy REINFORCE on `GymRoomEnv` and plots rolling
-MAE; **Run trained RL on this episode** compares that policy to oracle MLE.
+Without `uv` (repo checkout + existing venv):
+
+```bash
+PYTHONPATH=src python -m light_learning.cli web --port 8768
+```
+
+Open **http://127.0.0.1:8768/** (use the port you passed). If 8768 is busy, pick
+another free port and open that URL instead.
+
+Sanity check that RL is mounted:
+
+```bash
+curl -s -X POST http://127.0.0.1:8768/api/rl/train \
+  -H 'Content-Type: application/json' \
+  -d '{"budget":4,"episodes":8}'
+```
+
+You should get JSON with `"trained": true` and a `history` list, not
+`unknown endpoint`.
+
+### What to click
+
+- **32 windows** — only for *you* playing: first `B` clicks look (yellow = ON,
+  gray = OFF); the next click is your peak guess. Skip the windows for MLE/RL.
+- **New episode** — new hidden θ. Required before MLE/RL if none is running
+  (the page also starts one on load).
+- **Run MLE on this episode** — oracle likelihood MLE samples its own uniform
+  slots. Do not click windows for it. Green = its guess.
+- **Train RL (250 episodes)** — REINFORCE on `GymRoomEnv` (same public
+  observation and terminal reward −|θ−θ̂|/31 as PPO). Wait a few seconds; a
+  blue rolling-MAE curve should appear. This is the demo trainer;
+  `light_learning.ppo` is Stable-Baselines3 PPO for longer runs.
+- **Run trained RL on this episode** — greedy policy on the current episode.
+  Blue outline = its guess. Train first or you get `train RL first`.
+
+Orange line / window outline = true peak (after a commit or a baseline run
+that reveals the curve). White dashed = your guess. Green = MLE. Blue = RL.
+
 
 ## Setup
 
