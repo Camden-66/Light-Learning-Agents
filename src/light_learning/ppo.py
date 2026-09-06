@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from collections import Counter
 from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError, version
@@ -28,6 +29,16 @@ PPO_AGENT_VERSION = "0.2.0"
 PPO_CONDITION = "trained_distribution_ppo"
 PPO_TRAINING_SEEDS = (0, 1, 2, 3, 4)
 PPO_MANIFEST_NAME = "ppo-training-manifest.json"
+
+# Below roughly 500k steps the policy collapses onto a near-constant answer: it
+# scores the best-constant-answer MAE, uses a handful of the 32 slots, and is
+# insensitive to the observation budget. Learning only switches on past that,
+# and is still improving at 1M. This default is the floor for a reportable run,
+# not a converged one; see the PPO section of the readme for the measured curve.
+PPO_DEFAULT_TIMESTEPS = 1_000_000
+
+# Below this, every seed measured so far collapsed onto a near-constant answer.
+PPO_COLLAPSE_THRESHOLD = 500_000
 
 
 def _validate_seed(seed: int) -> int:
@@ -299,7 +310,7 @@ def build_training_manifest(
     output_dir: str | Path,
     budgets: Sequence[int] = BUDGETS,
     seeds: Sequence[int] = PPO_TRAINING_SEEDS,
-    total_timesteps: int = 20_000,
+    total_timesteps: int = PPO_DEFAULT_TIMESTEPS,
     config: RoomConfig | None = None,
     ppo_kwargs: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -347,7 +358,7 @@ def build_training_manifest(
 def train_ppo(
     budget: int,
     seed: int,
-    total_timesteps: int = 20_000,
+    total_timesteps: int = PPO_DEFAULT_TIMESTEPS,
     save_dir: str | Path | None = None,
     *,
     config: RoomConfig | None = None,
@@ -364,6 +375,16 @@ def train_ppo(
         raise TypeError("total_timesteps must be an integer")
     if total_timesteps <= 0:
         raise ValueError("total_timesteps must be positive")
+    if total_timesteps < PPO_COLLAPSE_THRESHOLD:
+        warnings.warn(
+            f"total_timesteps={total_timesteps:,} is below the measured collapse "
+            f"threshold of {PPO_COLLAPSE_THRESHOLD:,}; every seed tried below it "
+            "converged on a near-constant answer that ignores the observations. "
+            "Check skill_over_constant in the evaluator summary before reporting "
+            "this run.",
+            UserWarning,
+            stacklevel=2,
+        )
     kwargs = dict(ppo_kwargs or {})
     reserved = {"policy", "env", "seed", "verbose", "device"}.intersection(kwargs)
     if reserved:
@@ -396,7 +417,7 @@ def train_ppo_suite(
     *,
     budgets: Sequence[int] = BUDGETS,
     seeds: Sequence[int] = PPO_TRAINING_SEEDS,
-    total_timesteps: int = 20_000,
+    total_timesteps: int = PPO_DEFAULT_TIMESTEPS,
     config: RoomConfig | None = None,
     ppo_kwargs: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:

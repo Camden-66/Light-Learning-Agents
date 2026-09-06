@@ -70,6 +70,7 @@ PRELIMINARY_PROFILES = frozenset({"pilot"})
 ARTIFACT_FLUSH_INTERVAL = 25
 
 
+
 class InvalidAction(ValueError):
     """Raised when an agent decision does not contain one valid integer action."""
 
@@ -813,6 +814,20 @@ def read_records(paths: Iterable[str | Path]) -> list[EpisodeRecord]:
     return records
 
 
+def _correlation(xs: Sequence[float], ys: Sequence[float]) -> float:
+    """Pearson correlation, defined as 0.0 when either side never varies."""
+
+    if len(xs) < 2:
+        return 0.0
+    mean_x, mean_y = statistics.fmean(xs), statistics.fmean(ys)
+    dx = [x - mean_x for x in xs]
+    dy = [y - mean_y for y in ys]
+    denominator = (sum(v * v for v in dx) * sum(v * v for v in dy)) ** 0.5
+    if denominator == 0:
+        return 0.0
+    return sum(a * b for a, b in zip(dx, dy)) / denominator
+
+
 def _metrics(
     records: Sequence[EpisodeRecord], *, scope: str, seed: int | None
 ) -> dict[str, Any]:
@@ -828,6 +843,51 @@ def _metrics(
     ]
     # Ascending theta order makes max's first-equal behaviour the required tie break.
     worst_theta, worst_mae, worst_count = max(slices, key=lambda item: item[1])
+    mean_absolute_error = statistics.fmean(errors)
+
+    # Degeneracy check: how does this policy compare with the best answer that
+    # ignores every observation? A collapsed policy still produces complete,
+    # well-formed records, so MAE alone cannot distinguish it from a real one.
+    thetas = [record.theta for record in records]
+    best_constant_slot = min(
+        range(SLOT_COUNT),
+        key=lambda slot: statistics.fmean(abs(theta - slot) for theta in thetas),
+    )
+    best_constant_mae = statistics.fmean(
+        abs(theta - best_constant_slot) for theta in thetas
+    )
+    skill_over_constant = (
+        (best_constant_mae - mean_absolute_error) / best_constant_mae
+        if best_constant_mae
+        else 0.0
+    )
+    # Paired per-episode comparison against that constant. A near-constant
+    # policy can post a small positive skill just by using two answers instead
+    # of one, so the effect size alone is not a usable test -- it has to clear
+    # the noise. Absolute error is heavy-tailed, which makes this strict.
+    gains = [
+        abs(record.theta - best_constant_slot) - record.absolute_error
+        for record in records
+    ]
+    mean_gain = statistics.fmean(gains)
+    gain_stderr = (
+        statistics.stdev(gains) / len(gains) ** 0.5 if len(gains) > 1 else 0.0
+    )
+    if gain_stderr > 0:
+        skill_z = mean_gain / gain_stderr
+    else:
+        skill_z = float("inf") if mean_gain > 0 else 0.0
+    # Does the estimate actually track the hidden peak? A policy that ignores
+    # its looks answers from a tiny fixed set no matter what theta was, so this
+    # collapses toward zero while MAE-based measures stay ambiguous.
+    theta_hats = [record.theta_hat for record in records]
+    theta_hat_correlation = _correlation(thetas, theta_hats)
+    looked_slots = {
+        event.get("action")
+        for record in records
+        for event in record.trace[:-1]
+        if event.get("action") is not None
+    }
     return {
         "agent_id": records[0].agent_id,
         "agent_version": records[0].agent_version,
@@ -838,8 +898,8 @@ def _metrics(
         "scope": scope,
         "training_seed": seed,
         "episode_count": len(records),
-        "mae": statistics.fmean(errors),
-        "mean_absolute_error": statistics.fmean(errors),
+        "mae": mean_absolute_error,
+        "mean_absolute_error": mean_absolute_error,
         "median_absolute_error": statistics.median(errors),
         "hit_within_one_slot_rate": sum(error <= 1 for error in errors) / len(errors),
         "protocol_failure_rate": sum(record.protocol_failure for record in records)
@@ -852,6 +912,13 @@ def _metrics(
         "worst_theta": worst_theta,
         "worst_theta_group_size": worst_count,
         "worst_theta_slice_preliminary": records[0].profile in PRELIMINARY_PROFILES,
+        "best_constant_mae": best_constant_mae,
+        "best_constant_slot": best_constant_slot,
+        "skill_over_constant": skill_over_constant,
+        "skill_over_constant_z": skill_z,
+        "theta_hat_correlation": theta_hat_correlation,
+        "distinct_estimates": len({record.theta_hat for record in records}),
+        "distinct_observation_slots": len(looked_slots),
         "configuration_digests": sorted(
             {record.configuration_digest for record in records}
         ),
@@ -876,17 +943,30 @@ def aggregate_metrics(records: Iterable[EpisodeRecord]) -> list[dict[str, Any]]:
     reports: list[dict[str, Any]] = []
     for key in sorted(groups, key=lambda item: tuple(str(part) for part in item)):
         group = groups[key]
-        reports.append(_metrics(group, scope="aggregate", seed=None))
-        for seed in sorted(
+        aggregate = _metrics(group, scope="aggregate", seed=None)
+        seeds = sorted(
             {record.training_seed for record in group if record.training_seed is not None}
-        ):
-            reports.append(
-                _metrics(
-                    [record for record in group if record.training_seed == seed],
-                    scope="training_seed",
-                    seed=seed,
-                )
+        )
+        per_seed = {
+            seed: _metrics(
+                [record for record in group if record.training_seed == seed],
+                scope="training_seed",
+                seed=seed,
             )
+            for seed in seeds
+        }
+        if per_seed:
+            seed_maes = {str(seed): report["mae"] for seed, report in per_seed.items()}
+            aggregate["per_training_seed_mae"] = seed_maes
+            aggregate["training_seed_mae_spread"] = max(seed_maes.values()) - min(
+                seed_maes.values()
+            )
+            aggregate["per_training_seed_skill"] = {
+                str(seed): report["skill_over_constant"]
+                for seed, report in per_seed.items()
+            }
+        reports.append(aggregate)
+        reports.extend(per_seed[seed] for seed in seeds)
     return reports
 
 
