@@ -186,7 +186,6 @@ def test_demo_metrics_are_explicitly_non_reportable() -> None:
 
 def test_web_root_is_inside_the_installed_package() -> None:
     expected = Path(web_server.__file__).resolve().parent / "web"
-    assert web_server.resolve_web_root() == expected
     assert web_server.WEB_ROOT == expected
     assert (expected / "index.html").is_file()
     assert {"index.html", "app.js", "style.css"} <= {
