@@ -19,6 +19,7 @@ WEB_ROOT = Path(__file__).resolve().parent / "web"
 _LOCK = threading.Lock()
 _SESSIONS: dict[str, dict] = {}
 _RL: dict | None = None
+_EMERGENT: dict | None = None
 _METRICS_CACHE: dict | None = None
 
 
@@ -113,6 +114,11 @@ class Handler(SimpleHTTPRequestHandler):
                 payload = _rl_public()
             self._json(200, payload)
             return
+        if path == "/api/emergent":
+            with _LOCK:
+                payload = _emergent_public()
+            self._json(200, payload)
+            return
         if path in ("", "/"):
             self.path = "/index.html"
         super().do_GET()
@@ -127,6 +133,17 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/rl/train":
             try:
                 payload = _train_rl(body)
+            except ApiError as exc:
+                self._json(exc.status, {"error": exc.message})
+                return
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+                return
+            self._json(200, payload)
+            return
+        if path == "/api/emergent/pool":
+            try:
+                payload = _pool_emergent(body)
             except ApiError as exc:
                 self._json(exc.status, {"error": exc.message})
                 return
@@ -151,6 +168,9 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if path == "/api/rl/play":
                     self._json(200, self._rl_play(body))
+                    return
+                if path == "/api/emergent/play":
+                    self._json(200, self._emergent_play(body))
                     return
             except ApiError as exc:
                 self._json(exc.status, {"error": exc.message})
@@ -177,6 +197,9 @@ class Handler(SimpleHTTPRequestHandler):
         mle_query_seed = secrets.randbits(63)
         while mle_query_seed == seed:
             mle_query_seed = secrets.randbits(63)
+        emergent_seed = secrets.randbits(63)
+        while emergent_seed in {seed, mle_query_seed}:
+            emergent_seed = secrets.randbits(63)
         env = RoomEnv(budget=budget)
         env.reset(seed=seed)
         sid = uuid.uuid4().hex
@@ -188,6 +211,7 @@ class Handler(SimpleHTTPRequestHandler):
             "episode_id": uuid.uuid4().hex,
             "seed": seed,
             "mle_query_seed": mle_query_seed,
+            "emergent_seed": emergent_seed,
         }
         _SESSIONS[sid] = session
         return _public(session)
@@ -295,6 +319,126 @@ class Handler(SimpleHTTPRequestHandler):
         result["curve"] = _curve(env.config, result["theta"])
         result["session"] = session["id"]
         return result
+
+    def _emergent_play(self, body: dict) -> dict:
+        session = self._session(body)
+        env: RoomEnv = session["env"]
+        terminal = _require_terminal(env)
+        prior = None
+        condition = "emergent_in_episode"
+        pooled = _EMERGENT
+        if pooled is not None and int(pooled["budget"]) == env.budget:
+            prior = pooled["prior"]
+            condition = "emergent_pooled_shape"
+        from .emergent import EmergentBumpAgent
+
+        clone = RoomEnv(env.config, budget=env.budget)
+        state = clone.reset(seed=session["seed"], theta=terminal.theta)
+        agent = EmergentBumpAgent(
+            policy_seed=session["emergent_seed"],
+            config=env.config,
+            shape_log_prior=prior,
+            condition=condition,
+        )
+        agent.start_episode(state)
+        trace: list[dict] = []
+        while state.phase == "observe":
+            decision = agent.act(state)
+            state = clone.observe(decision.action)
+            last = state.history[-1]
+            trace.append(
+                {
+                    "step": len(trace),
+                    "phase": "observe",
+                    "action": last.time_slot,
+                    "light_on": int(last.light_on),
+                }
+            )
+        decision = agent.act(state)
+        outcome = clone.estimate(decision.action)
+        meta = dict(decision.metadata)
+        return {
+            "session": session["id"],
+            "condition": condition,
+            "theta": outcome.theta,
+            "theta_hat": outcome.theta_hat,
+            "absolute_error": outcome.absolute_error,
+            "sigma": meta.get("sigma"),
+            "background": meta.get("background"),
+            "amplitude": meta.get("amplitude"),
+            "sigma_mass_at_3": meta.get("sigma_mass_at_3"),
+            "inferred_curve": meta.get("curve"),
+            "curve": _curve(env.config, outcome.theta),
+            "canonical_formula_disclosed": False,
+            "trace": trace
+            + [
+                {
+                    "step": env.budget,
+                    "phase": "terminal",
+                    "action": outcome.theta_hat,
+                    "light_on": None,
+                }
+            ],
+        }
+
+
+def _emergent_public() -> dict:
+    if _EMERGENT is None:
+        return {
+            "pooled": False,
+            "reportable": False,
+            "evaluation_label": "non_reportable_demo_smoke",
+        }
+    return {
+        "pooled": True,
+        "reportable": False,
+        "evaluation_label": "non_reportable_demo_smoke",
+        "budget": _EMERGENT["budget"],
+        "n_episodes": _EMERGENT["n_episodes"],
+        "sigma_mass_at_3": _EMERGENT["sigma_mass_at_3"],
+        "note": (
+            "Pooled (sigma, a, b) from training rooms with revealed peaks. "
+            "Compare on this page uses that prior if budgets match."
+        ),
+    }
+
+
+def _pool_emergent(body: dict) -> dict:
+    global _EMERGENT
+    from .emergent import (
+        TRUE_SIGMA,
+        EmergentBumpAgent,
+        collect_labeled_episode,
+        hypothesis_grid,
+        pool_shape_log_prior,
+        shape_posterior_mass,
+    )
+
+    budget = int(body.get("budget", 8))
+    n_episodes = int(body.get("episodes", 8))
+    seed = int(body.get("seed", 0))
+    labeled = []
+    for i in range(n_episodes):
+        agent = EmergentBumpAgent(policy_seed=seed + i)
+        history, theta, _outcome = collect_labeled_episode(
+            lambda: RoomEnv(budget=budget),
+            agent,
+            seed=3_000_000 + seed * 1000 + budget * 100 + i,
+        )
+        labeled.append((history, theta))
+    hyps = hypothesis_grid()
+    prior = pool_shape_log_prior(labeled, hyps)
+    mass = shape_posterior_mass(
+        [], hyps, sigma=TRUE_SIGMA, shape_log_prior=prior
+    )
+    with _LOCK:
+        _EMERGENT = {
+            "budget": budget,
+            "n_episodes": n_episodes,
+            "prior": prior,
+            "sigma_mass_at_3": mass,
+        }
+    return _emergent_public()
 
 
 def _rl_public() -> dict:

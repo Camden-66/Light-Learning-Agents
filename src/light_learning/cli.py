@@ -66,6 +66,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     report_parser.add_argument("records", nargs="+")
     report_parser.add_argument("--output", required=True)
+    compare_parser = subparsers.add_parser(
+        "compare",
+        help="emergent world-model vs basic RL vs oracle MLE (not official eval)",
+    )
+    compare_parser.add_argument("--profile", default="pilot")
+    compare_parser.add_argument("--seed", type=int, default=0)
+    compare_parser.add_argument("--reinforce-episodes", type=int, default=120)
+    compare_parser.add_argument("--pool-episodes", type=int, default=12)
+    compare_parser.add_argument(
+        "--budget",
+        dest="budgets",
+        type=int,
+        action="append",
+        help="repeat to choose budgets; default is 4 and 8",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "preflight":
@@ -90,6 +105,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .evaluator import aggregate_metrics, read_records, write_summary
 
         write_summary(args.output, aggregate_metrics(read_records(args.records)))
+        return 0
+    if args.command == "compare":
+        from .compare import run_organic_comparison
+
+        budgets = tuple(args.budgets) if args.budgets else (4, 8)
+        report = run_organic_comparison(
+            profile=args.profile,
+            seed=args.seed,
+            reinforce_episodes=args.reinforce_episodes,
+            pool_episodes=args.pool_episodes,
+            budgets=budgets,
+        )
+        print(json.dumps(report, indent=2, sort_keys=True))
         return 0
     raise AssertionError("unreachable")
 
