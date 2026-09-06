@@ -18,12 +18,20 @@ dependencies = [
 dev = [
   "pytest>=8.0,<10.0",
 ]
+rl = [
+  "stable-baselines3>=2.7,<3.0",
+]
 
 [project.scripts]
 light-learning = "light_learning.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/light_learning"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/light_learning/web/index.html" = "light_learning/web/index.html"
+"src/light_learning/web/app.js" = "light_learning/web/app.js"
+"src/light_learning/web/style.css" = "light_learning/web/style.css"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

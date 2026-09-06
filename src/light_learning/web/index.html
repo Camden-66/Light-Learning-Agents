@@ -13,7 +13,7 @@
     <p class="lede">
       This page talks to the canonical <strong>RoomEnv</strong> in the repo — 32 time slots, a hidden peak,
       binary on/off draws. Play as the agent, then run <strong>oracle MLE</strong> on the same episode,
-      and see what <strong>PPO</strong> is trained to do.
+      and compare with a small <strong>REINFORCE demonstration</strong>.
     </p>
   </header>
 
@@ -26,13 +26,15 @@
       Score is |θ − θ̂| (lower is better). θ is private until you commit.</p>
     </article>
     <article>
-      <h2>What the two baselines do</h2>
+      <h2>What the benchmark baselines do</h2>
       <p><strong>Oracle MLE</strong> does not adapt: it spends the budget on i.i.d. uniform slots, then maximizes the
       <strong>true</strong> Bernoulli likelihood over θ ∈ {4,…,27} (smallest candidate on a tie). It knows the formula,
-      so it is a reference upper bound, not an information-matched human baseline.</p>
+      so it is an oracle-information reference, not an information-matched human baseline.</p>
       <p><strong>PPO</strong> never sees the formula. It only sees on-counts, visit-counts, remaining budget, and a
       commit flag. Looks give reward 0; the only reward is −|θ − θ̂| / 31 at commit. It learns a search policy,
       not the curve itself.</p>
+      <p>The quick interactive trainer below is <strong>REINFORCE, not PPO</strong>. Its smoke-sample numbers are
+      illustrative and must not be reported as official benchmark results.</p>
     </article>
   </section>
 
@@ -48,8 +50,8 @@
         </select>
       </div>
       <button type="button" id="new">New episode</button>
-      <button type="button" id="run-mle">Run MLE on this episode</button>
-      <button type="button" id="run-rl">Run trained RL on this episode</button>
+      <button type="button" id="run-mle" disabled>Compare oracle MLE</button>
+      <button type="button" id="run-rl" disabled>Compare REINFORCE demo</button>
       <p class="status" id="status">Click New episode, then click windows to look. After the budget, click once to commit.</p>
     </div>
 
@@ -58,7 +60,7 @@
       <div><span>Phase</span><strong id="phase">—</strong></div>
       <div><span>Your error</span><strong id="you-err">not committed</strong></div>
       <div><span>MLE error</span><strong id="mle-err">not run</strong></div>
-      <div><span>RL error</span><strong id="rl-err">not run</strong></div>
+      <div><span>REINFORCE demo error</span><strong id="rl-err">not run</strong></div>
     </div>
 
     <p class="caption">32 windows = 32 slots. Yellow = ON, cool gray = OFF, empty = unvisited.</p>
@@ -67,7 +69,7 @@
 
     <div class="charts">
       <figure>
-        <figcaption>True P(on | t) — revealed after you commit or after MLE runs</figcaption>
+        <figcaption>True P(on | t) — revealed only after you commit</figcaption>
         <canvas id="curve" width="960" height="220"></canvas>
       </figure>
       <figure>
@@ -86,13 +88,13 @@
       Stable-Baselines3 PPO lives in <code>light_learning.ppo</code> for longer runs.
     </p>
     <div class="stage-bar">
-      <button type="button" id="train-rl">Train RL (250 episodes)</button>
+      <button type="button" id="train-rl">Train REINFORCE demo (250 episodes)</button>
       <p class="status" id="rl-status">Not trained yet. Training uses random peaks, not the episode you are playing.</p>
     </div>
     <div class="meters" id="rl-meters">
       <div><span>Train episodes</span><strong id="rl-n">—</strong></div>
-      <div><span>Held-out MAE</span><strong id="rl-mae">—</strong></div>
-      <div><span>Hit within 1</span><strong id="rl-hit">—</strong></div>
+      <div><span>Smoke-sample MAE</span><strong id="rl-mae">—</strong></div>
+      <div><span>Demo hit within 1</span><strong id="rl-hit">—</strong></div>
     </div>
     <figure>
       <figcaption>Training MAE (25-episode rolling mean) vs episode — lower is better</figcaption>
@@ -110,8 +112,8 @@
   </section>
 
   <section class="results">
-    <h2>Oracle MLE on a 10-episode pilot</h2>
-    <p class="caption">MLE on 10 episodes per budget (pilot). Train RL above to fill in a policy MAE.</p>
+    <h2>Non-reportable oracle MLE smoke sample</h2>
+    <p class="caption" id="metrics-warning">Loading illustrative smoke-sample results…</p>
     <div class="cards" id="metric-cards"></div>
   </section>
 

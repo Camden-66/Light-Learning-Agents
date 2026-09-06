@@ -34,7 +34,11 @@ class LinearSoftmax:
     def greedy(self, phi: np.ndarray) -> int:
         return int(np.argmax(self._pi(phi)))
 
-    def update(self, trajectory: list[tuple[np.ndarray, int, np.ndarray]], advantage: float) -> None:
+    def update(
+        self,
+        trajectory: list[tuple[np.ndarray, int, np.ndarray]],
+        advantage: float,
+    ) -> None:
         if not trajectory:
             return
         g = np.zeros_like(self.W)
@@ -42,7 +46,13 @@ class LinearSoftmax:
             indic = np.zeros(self.n_actions)
             indic[action] = 1.0
             g += advantage * np.outer(indic - pi, phi)
-        g -= self.entropy_coef * self.W
+            # Entropy gradient for a categorical softmax policy.  This is kept
+            # separate from the policy-gradient term so ``entropy_coef`` means
+            # what its name says rather than acting as L2 weight decay.
+            safe_pi = np.clip(pi, 1e-15, 1.0)
+            entropy = -float(np.sum(safe_pi * np.log(safe_pi)))
+            entropy_grad_logits = -safe_pi * (np.log(safe_pi) + entropy)
+            g += self.entropy_coef * np.outer(entropy_grad_logits, phi)
         self.W += self.lr * g / len(trajectory)
         np.clip(self.W, -8.0, 8.0, out=self.W)
 
@@ -61,8 +71,8 @@ def train_reinforce(
     history: list[dict] = []
     window: list[int] = []
     for ep in range(n_episodes):
-        env.reset(seed=int(rng.integers(0, 2**31 - 1)))
-        result = _rollout(env, policy, greedy=False)
+        obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
+        result = _rollout(env, policy, obs, greedy=False)
         advantage = result["reward"] - baseline
         baseline = momentum * baseline + (1.0 - momentum) * result["reward"]
         policy.update(result["trajectory"], advantage)
@@ -78,10 +88,14 @@ def train_reinforce(
                     "mae_window": float(np.mean(window)),
                 }
             )
+    # This independent stream makes the explainer's smoke check stable when
+    # the number of training episodes changes.  These are deliberately not
+    # benchmark held-out episodes; official evaluation is evaluator-owned.
+    eval_rng = np.random.default_rng(np.random.SeedSequence([seed, budget, 0x524C]))
     eval_errors = []
     for _ in range(eval_episodes):
-        env.reset(seed=int(rng.integers(0, 2**31 - 1)))
-        eval_errors.append(_rollout(env, policy, greedy=True)["absolute_error"])
+        obs, _ = env.reset(seed=int(eval_rng.integers(0, 2**31 - 1)))
+        eval_errors.append(_rollout(env, policy, obs, greedy=True)["absolute_error"])
     return {
         "budget": budget,
         "n_episodes": n_episodes,
@@ -90,14 +104,24 @@ def train_reinforce(
         "eval_hit_within_one": float(np.mean([e <= 1 for e in eval_errors])),
         "W": policy.W.tolist(),
         "algo": "reinforce",
-        "note": "Linear softmax REINFORCE on GymRoomEnv; same observation/reward as PPO.",
+        "evaluation_scope": "non_reportable_smoke_demo",
+        "note": (
+            "Linear softmax REINFORCE explainer on GymRoomEnv; the smoke metrics "
+            "are not PPO results or benchmark evaluation."
+        ),
     }
 
 
-def _rollout(env: GymRoomEnv, policy: LinearSoftmax, *, greedy: bool) -> dict:
-    obs = env._vector(env._state) if env._state is not None else None
-    if obs is None:
-        obs, _ = env.reset()
+def _rollout(
+    env: GymRoomEnv,
+    policy: LinearSoftmax,
+    observation: np.ndarray,
+    *,
+    greedy: bool,
+) -> dict:
+    """Complete a rollout using only the observation returned by Gymnasium."""
+
+    obs = observation
     trajectory: list[tuple[np.ndarray, int, np.ndarray]] = []
     terminated = False
     info: dict = {}
