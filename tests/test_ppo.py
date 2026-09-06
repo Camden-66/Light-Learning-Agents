@@ -190,3 +190,15 @@ def test_ppo_smoke_training_checkpoint_and_evaluator_rollout(tmp_path) -> None:
     outcome = env.estimate(terminal_decision.action)
     assert 0 <= outcome.theta_hat < 32
     assert outcome.theta == 17
+
+
+def test_training_below_the_collapse_threshold_warns() -> None:
+    """Nobody should train a degenerate policy without being told."""
+
+    import pytest
+
+    from light_learning.ppo import PPO_COLLAPSE_THRESHOLD, PPO_DEFAULT_TIMESTEPS, train_ppo
+
+    assert PPO_DEFAULT_TIMESTEPS >= PPO_COLLAPSE_THRESHOLD
+    with pytest.warns(UserWarning, match="collapse threshold"):
+        train_ppo(budget=4, seed=0, total_timesteps=16)

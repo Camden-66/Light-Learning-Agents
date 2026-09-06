@@ -174,14 +174,41 @@ each theta group, then report the maximum group MAE, the responsible theta,
 and that group's record count. Break equal worst-MAE ties toward the smallest
 theta. The pilot report must label this metric preliminary.
 
-## Acceptance tests
+### Degeneracy diagnostics
 
-- Deterministic episode-definition generation and theta stratification.
-- Deterministic per-episode agent-policy seeding independent of hidden room seeds.
-- Same episode seed/slot/repeat index gives the same room outcome regardless
-  of cross-slot query ordering.
-- No pre-terminal trace or state leaks hidden theta or score.
-- Exactly `B` observations and one final estimate are recorded.
-- Invalid agents complete through the documented fallback and remain in metrics.
-- Hand-built records yield correct aggregate and worst-theta-slice metrics.
-- JSONL/summary/manifest output is JSON-serializable and resumable by run ID.
+MAE alone cannot distinguish a real policy from one that has collapsed onto a
+near-constant answer: a collapsed agent still completes every episode, raises no
+protocol failure, uses no fallback, and writes well-formed records. Each cell
+must therefore also report:
+
+- `best_constant_mae` and `best_constant_slot` — the best single answer that
+  ignores every observation, over that cell's own true thetas;
+- `skill_over_constant` — the fraction of `best_constant_mae` the agent removes;
+- `skill_over_constant_z` — the same comparison paired per episode and divided
+  by its standard error;
+- `theta_hat_correlation` — Pearson correlation between theta and theta_hat,
+  defined as zero when either never varies;
+- `distinct_estimates` and `distinct_observation_slots` — action-space coverage.
+
+**Report these numbers; do not reduce them to a verdict.** No single threshold
+separates collapsed from real policies. Measured on 100 held-out episodes at
+budget 8:
+
+| policy | MAE | skill | z | corr | estimates | slots |
+|---|---:|---:|---:|---:|---:|---:|
+| PPO, 20k steps | 5.37 | +0.09 | 2.56 | 0.467 | 2/32 | 3/32 |
+| PPO, 1M steps | 4.19 | +0.29 | 7.44 | 0.828 | 3/32 | 10/32 |
+| oracle MLE | 2.06 | +0.65 | 8.88 | 0.867 | 24/32 | 32/32 |
+
+The 20k policy answers with two slots out of thirty-two and is plainly
+degenerate, yet it clears a `z >= 2` significance bar — a two-constant policy
+really is better than the best one-constant policy — and its correlation is not
+near zero. Only action-space coverage separates it cleanly here, and coverage
+alone would misjudge a genuinely sharp policy on an easy cell. Read the row
+together.
+
+An aggregate row over multiple training seeds must additionally carry
+`per_training_seed_mae`, `per_training_seed_skill`, and
+`training_seed_mae_spread`. Seed outcomes can be bimodal — some seeds escape
+collapse and some do not — and a mean across a bimodal cell describes neither
+mode, so the per-seed rows are the reportable ones.

@@ -780,3 +780,94 @@ def test_llm_agent_self_reported_fallback_is_honoured():
     assert record.fallback_used
     assert [event["action"] for event in record.trace[:-1]] == [0, 1, 2, 3]
     assert all(event["metadata"]["errors"] for event in record.trace)
+
+
+# ---------------------------------------------------------------------------
+# Degenerate-policy detection
+# ---------------------------------------------------------------------------
+
+
+class ConstantAgent:
+    """Ignores every observation and always names the same slot."""
+
+    agent_id, agent_version, condition = "constant", "v1", "degenerate"
+
+    def __init__(self, slot: int = 15) -> None:
+        self.slot = slot
+
+    def start_episode(self, state): pass
+
+    def act(self, state):
+        return AgentDecision(action=self.slot)
+
+    def run_metadata(self):
+        return {}
+
+
+def test_constant_policy_shows_as_carrying_no_information():
+    """MAE alone cannot separate a collapsed policy from a real one."""
+
+    records = evaluate_profile(
+        ConstantAgent, profile="pilot",
+        agent_id="constant", agent_version="v1", condition="degenerate",
+    )
+    for report in aggregate_metrics(records):
+        assert report["skill_over_constant"] <= 0.0
+        assert report["theta_hat_correlation"] == 0.0
+        assert report["distinct_estimates"] == 1
+        assert report["distinct_observation_slots"] == 1
+        assert report["mae"] >= report["best_constant_mae"]
+
+
+def test_real_policy_shows_as_carrying_information():
+    records = evaluate_profile(
+        mle_factory, profile="pilot",
+        agent_id="mle", agent_version="0.2.0", condition="oracle_mle",
+    )
+    for report in aggregate_metrics(records):
+        assert report["distinct_estimates"] > 1
+        assert report["skill_over_constant"] > 0.3
+        # The estimate tracks the hidden peak, which a collapsed policy cannot
+        # do. The bound is loose because a 10-episode pilot cell is noisy.
+        assert report["theta_hat_correlation"] > 0.4
+        if report["budget"] == 32:
+            assert report["skill_over_constant"] > 0.8
+            assert report["theta_hat_correlation"] > 0.95
+
+
+def test_correlation_is_zero_when_either_side_never_varies():
+    from light_learning.evaluator import _correlation
+
+    assert _correlation([1, 2, 3], [5, 5, 5]) == 0.0
+    assert _correlation([5, 5, 5], [1, 2, 3]) == 0.0
+    assert _correlation([1, 2, 3], [2, 4, 6]) == pytest.approx(1.0)
+    assert _correlation([1], [1]) == 0.0
+
+
+def test_best_constant_mae_is_the_true_minimum():
+    # thetas 4 and 20 -> the best constant sits between them.
+    records = [make_record(4, 4), make_record(20, 20)]
+    report = next(r for r in aggregate_metrics(records) if r["scope"] == "aggregate")
+    expected = min(
+        (abs(4 - slot) + abs(20 - slot)) / 2 for slot in range(SLOT_COUNT)
+    )
+    assert report["best_constant_mae"] == pytest.approx(expected)
+
+
+def test_aggregate_row_exposes_per_seed_spread():
+    """A bimodal cell must not hide behind its mean."""
+
+    records = [
+        make_record(10, 10, seed=0),   # seed 0 nails it
+        make_record(20, 20, seed=0),
+        make_record(10, 25, seed=1),   # seed 1 is far off
+        make_record(20, 5, seed=1),
+    ]
+    aggregate = next(
+        r for r in aggregate_metrics(records) if r["scope"] == "aggregate"
+    )
+    assert aggregate["per_training_seed_mae"] == {"0": 0.0, "1": 15.0}
+    assert aggregate["training_seed_mae_spread"] == pytest.approx(15.0)
+    # Seed 1 removes none of the constant-answer error; seed 0 removes all of it.
+    assert aggregate["per_training_seed_skill"]["0"] > 0.9
+    assert aggregate["per_training_seed_skill"]["1"] < 0.0
