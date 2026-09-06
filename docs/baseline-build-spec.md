@@ -69,7 +69,8 @@ only the Gymnasium observation, action space, and reward supplied above.
 - Sample theta and observation randomness from the canonical training
   distribution; never train on held-out evaluation episode IDs or seeds.
 - Evaluate each trained policy deterministically (`deterministic=True`).
-- Emit one shared `EpisodeRecord` per held-out episode.
+- Implement the shared agent protocol so the evaluator can emit one
+  `EpisodeRecord` per held-out episode.
 - Report results by training seed as well as their aggregate; do not retain
   only the strongest training run.
 
@@ -97,6 +98,12 @@ The historical name “IID MLE” may appear in discussion, but the implementati
 and reports must call it **passive uniform-query oracle likelihood MLE**. The
 query slots are IID; the Bernoulli outcomes are not identically distributed
 when sampled at different slots.
+
+The evaluator must give each MLE episode an explicit query-policy seed that is
+independent of the hidden room episode seed and theta. Re-running or resuming
+an evaluation must reconstruct the same query schedule without replaying prior
+episodes. Record the query-policy seed and canonical likelihood configuration
+in agent metadata so the baseline configuration can be reproduced and hashed.
 
 Do not make this baseline adaptive, Bayesian, or nonparametric in the first
 benchmark version. Those are separate future baselines.
@@ -141,15 +148,19 @@ size is small.
   terminal score.
 - Correct phase transition, terminal reward, score, and tie behavior.
 - Hand-calculated likelihood tests for the MLE reference.
-- PPO smoke training that produces valid terminal estimates and records.
-- Held-out evaluator run that produces schema-valid records and aggregate
-  metrics, including worst-theta-slice MAE.
+- Reproducible MLE query schedules at every budget, including resumed runs.
+- PPO smoke training, checkpoint reload, and an agent-protocol rollout that
+  produces a valid terminal estimate.
+- Once the evaluator deliverable is available, a held-out integration run that
+  produces schema-valid records and aggregate metrics, including
+  worst-theta-slice MAE.
 
 ## Fairness interpretation
 
-The oracle MLE knows the likelihood and is an upper/reference point, not an
-information-matched cognitive baseline. The RL baseline learns from the
-training distribution. The primary LLM condition receives only qualitative
-room rules, while the disclosed-likelihood LLM condition is a separate
-ablation. Reports must retain these labels rather than presenting all methods
-as equivalent-information comparisons.
+The oracle MLE knows the likelihood and is an oracle-information reference
+point, not a guaranteed performance upper bound or an information-matched
+cognitive baseline. The RL baseline learns from the training distribution.
+The primary LLM condition receives only qualitative room rules, while the
+disclosed-likelihood LLM condition is a separate ablation. Reports must retain
+these labels rather than presenting all methods as equivalent-information
+comparisons.

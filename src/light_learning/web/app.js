@@ -35,6 +35,7 @@ function paintWindows() {
   const play = state.play;
   const mle = state.mle;
   [...room.children].forEach((el, t) => {
+    el.disabled = !play || play.done;
     el.classList.remove("on", "off", "true", "you", "mle", "rl");
     if (!play) return;
     const visits = play.visit_counts[t];
@@ -45,6 +46,12 @@ function paintWindows() {
     if (mle && mle.theta_hat === t) el.classList.add("mle");
     if (state.rlPlay && state.rlPlay.theta_hat === t) el.classList.add("rl");
   });
+}
+
+function paintComparisonControls() {
+  const available = Boolean(state.play && state.play.done);
+  document.getElementById("run-mle").disabled = !available;
+  document.getElementById("run-rl").disabled = !available;
 }
 
 function setStatus(text) {
@@ -88,7 +95,7 @@ function drawCurve(canvas, values, marks) {
   if (!values) {
     ctx.fillStyle = "#6d6456";
     ctx.font = "16px Palatino, serif";
-    ctx.fillText("Peak still hidden. Commit or run MLE to reveal the true curve.", 48, h / 2);
+    ctx.fillText("Peak still hidden. Commit your estimate to reveal the true curve.", 48, h / 2);
     return;
   }
   const x = (i) => 40 + (i / 31) * (w - 60);
@@ -207,6 +214,7 @@ async function newEpisode() {
   setStatus(`Episode ${state.play.episode_id}. Click windows to look. θ is still hidden.`);
   addLog(`Start. Budget ${budget}.`);
   paintWindows();
+  paintComparisonControls();
   renderMeters();
   paintObs(state.play.obs);
   refreshCharts();
@@ -239,6 +247,7 @@ async function onSlot(t) {
     setStatus(`Revealed: peak at ${res.theta}. Orange = truth, dashed = you, green = MLE if run.`);
   }
   paintWindows();
+  paintComparisonControls();
   renderMeters();
   paintObs(state.play.obs);
   refreshCharts();
@@ -249,7 +258,16 @@ async function runMle() {
     setStatus("Start an episode first.");
     return;
   }
-  state.mle = await api("/api/mle", { session: state.session });
+  if (!state.play || !state.play.done) {
+    setStatus("Commit your estimate before revealing comparison results.");
+    return;
+  }
+  const res = await api("/api/mle", { session: state.session });
+  if (res.error) {
+    setStatus(res.error);
+    return;
+  }
+  state.mle = res;
   const n = state.mle.trace.filter((e) => e.phase === "observe").length;
   addLog(`MLE sampled ${n} uniform slots, guessed ${state.mle.theta_hat}, error ${state.mle.absolute_error}.`);
   setStatus("MLE scored every candidate with the true formula. Green bar / outline is its guess.");
@@ -271,7 +289,7 @@ function drawRl(canvas, history) {
   if (!history || !history.length) {
     ctx.fillStyle = "#6d6456";
     ctx.font = "16px Palatino, serif";
-    ctx.fillText("Click Train RL. The curve is rolling MAE on GymRoomEnv episodes.", 48, h / 2);
+    ctx.fillText("Train the REINFORCE demo to see its rolling MAE.", 48, h / 2);
     return;
   }
   const xs = history.map((p) => p.episode);
@@ -303,9 +321,9 @@ function renderRlTrain(data) {
     return;
   }
   document.getElementById("rl-n").textContent = String(data.n_episodes);
-  document.getElementById("rl-mae").textContent = data.eval_mae.toFixed(2);
-  document.getElementById("rl-hit").textContent = `${(data.eval_hit_within_one * 100).toFixed(0)}%`;
-  status.textContent = `${data.algo} on budget ${data.budget}. Held-out MAE ${data.eval_mae.toFixed(2)}. ${data.note}`;
+  document.getElementById("rl-mae").textContent = data.demo_mae.toFixed(2);
+  document.getElementById("rl-hit").textContent = `${(data.demo_hit_within_one * 100).toFixed(0)}%`;
+  status.textContent = `REINFORCE demo on budget ${data.budget}. Smoke-sample MAE ${data.demo_mae.toFixed(2)}. ${data.note}`;
   drawRl(document.getElementById("rl-chart"), data.history);
 }
 
@@ -313,7 +331,7 @@ async function trainRl() {
   const btn = document.getElementById("train-rl");
   const budget = Number(document.getElementById("budget").value);
   btn.disabled = true;
-  document.getElementById("rl-status").textContent = "Training on GymRoomEnv… a few seconds.";
+  document.getElementById("rl-status").textContent = "Training the REINFORCE demo… a few seconds.";
   try {
     const data = await api("/api/rl/train", { budget, episodes: 250, seed: 0 });
     if (data.error) {
@@ -321,7 +339,7 @@ async function trainRl() {
       return;
     }
     renderRlTrain(data);
-    addLog(`RL trained ${data.n_episodes} episodes. Held-out MAE ${data.eval_mae.toFixed(2)}.`);
+    addLog(`REINFORCE demo trained ${data.n_episodes} episodes. Smoke-sample MAE ${data.demo_mae.toFixed(2)}.`);
   } finally {
     btn.disabled = false;
   }
@@ -332,6 +350,10 @@ async function runRl() {
     setStatus("Start an episode first.");
     return;
   }
+  if (!state.play || !state.play.done) {
+    setStatus("Commit your estimate before revealing comparison results.");
+    return;
+  }
   const res = await api("/api/rl/play", { session: state.session });
   if (res.error) {
     setStatus(res.error);
@@ -339,8 +361,8 @@ async function runRl() {
     return;
   }
   state.rlPlay = res;
-  addLog(`RL guessed ${res.theta_hat}, error ${res.absolute_error}.`);
-  setStatus("Blue outline is the trained RL estimate on this episode.");
+  addLog(`REINFORCE demo guessed ${res.theta_hat}, error ${res.absolute_error}.`);
+  setStatus("Blue outline is the trained REINFORCE demo estimate on this episode.");
   paintWindows();
   renderMeters();
   refreshCharts();
@@ -349,14 +371,15 @@ async function runRl() {
 async function loadMetrics() {
   const metrics = await api("/api/metrics");
   const host = document.getElementById("metric-cards");
+  document.getElementById("metrics-warning").textContent = metrics.warning;
   host.innerHTML = "";
-  Object.keys(metrics)
+  Object.keys(metrics.budgets || {})
     .sort((a, b) => Number(a) - Number(b))
     .forEach((b) => {
-      const s = metrics[b];
+      const s = metrics.budgets[b];
       const el = document.createElement("div");
       el.className = "card";
-      el.innerHTML = `<span>Budget B=${b}</span><b>${s.mae.toFixed(2)}</b><span>MAE · hit within 1 slot ${(s.hit_within_one * 100).toFixed(0)}%</span>`;
+      el.innerHTML = `<span>Budget B=${b}</span><b>${s.mae.toFixed(2)}</b><span>Demo MAE · hit within 1 slot ${(s.hit_within_one * 100).toFixed(0)}%</span>`;
       host.appendChild(el);
     });
 }
@@ -366,6 +389,7 @@ document.getElementById("run-mle").addEventListener("click", runMle);
 document.getElementById("run-rl").addEventListener("click", runRl);
 document.getElementById("train-rl").addEventListener("click", trainRl);
 buildRoom();
+paintComparisonControls();
 drawCurve(document.getElementById("curve"), null);
 drawLL(document.getElementById("ll"), null);
 drawRl(document.getElementById("rl-chart"), null);

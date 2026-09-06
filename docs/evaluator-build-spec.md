@@ -32,6 +32,13 @@ state = env.reset(seed=episode_seed, theta=theta)
 `theta` and `episode_seed` are evaluator-owned hidden inputs. They must not be
 passed to an agent.
 
+If an agent has a stochastic policy, instantiate it per episode with a
+deterministic evaluator-owned policy seed derived independently of `theta` and
+`episode_seed`. The seed may depend on the evaluator master seed, agent version,
+condition, budget, and opaque episode ID. Record it in agent metadata. This
+must make a resumed episode identical without replaying earlier episodes; never
+reuse the hidden room seed as an agent-policy seed.
+
 `RoomState` contains only:
 
 ```python
@@ -170,6 +177,7 @@ theta. The pilot report must label this metric preliminary.
 ## Acceptance tests
 
 - Deterministic episode-definition generation and theta stratification.
+- Deterministic per-episode agent-policy seeding independent of hidden room seeds.
 - Same episode seed/slot/repeat index gives the same room outcome regardless
   of cross-slot query ordering.
 - No pre-terminal trace or state leaks hidden theta or score.
